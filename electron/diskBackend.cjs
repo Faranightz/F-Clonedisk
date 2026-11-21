@@ -1,5 +1,6 @@
 const { execFile } = require('child_process');
 const os = require('os');
+const advancedTools = require('./advancedTools.cjs');
 
 const REAL_WINDOWS_SUPPORTED_OPS = new Set([
   'create',
@@ -11,6 +12,10 @@ const REAL_WINDOWS_SUPPORTED_OPS = new Set([
   'convert_gpt',
   'check_partition',
   'wipe_disk',
+  'clone_disk',
+  'migrate_os',
+  'backup_vhdx',
+  'app_mover',
 ]);
 
 const ALLOWED_WINDOWS_FS = new Set(['NTFS', 'FAT32', 'exFAT', 'ReFS']);
@@ -256,8 +261,40 @@ function buildWindowsCommand(op) {
       return `Repair-Volume -DriveLetter ${letter} -Scan`;
     }
 
-    case 'wipe_disk':
+    case 'wipe_disk': {
+      if (params.method) {
+        const wArgs = advancedTools.buildWorkerArgs('wipe', { diskNumber, method: params.method });
+        return `FClonedisk.DiskWorker.exe ${wArgs.join(' ')}`;
+      }
       return `Clear-Disk -Number ${diskNumber} -RemoveData -RemoveOEM -Confirm:$false`;
+    }
+
+    case 'clone_disk': {
+      const wArgs = advancedTools.buildWorkerArgs('clone', {
+        sourceDiskNumber: params.sourceDiskNumber,
+        targetDiskNumber: params.targetDiskNumber ?? diskNumber,
+      });
+      return `FClonedisk.DiskWorker.exe ${wArgs.join(' ')}`;
+    }
+
+    case 'migrate_os': {
+      const plan = advancedTools.buildMigrateOsCommands(
+        params.sourceDiskNumber,
+        params.targetDiskNumber ?? diskNumber,
+        params.targetOsLetter || 'Z',
+        params.targetEfiLetter || 'S'
+      );
+      return `FClonedisk.DiskWorker.exe ${plan.workerArgs.join(' ')} && ${plan.bcdCommand}`;
+    }
+
+    case 'backup_vhdx':
+      return advancedTools.buildBackupCommand(params);
+
+    case 'app_mover': {
+      const paths = Array.isArray(params.sourcePaths) ? params.sourcePaths : params.sourcePath ? [params.sourcePath] : [];
+      if (paths.length === 0) throw new Error('Aucun chemin source spécifié pour App Mover.');
+      return paths.map((p) => advancedTools.buildAppMoverScript(p, params.targetDrive)).join('; ');
+    }
 
     default:
       throw new Error(`Opération non prise en charge : ${String(op.type)}`);
@@ -506,7 +543,18 @@ async function listWindowsDisks() {
     const raw = await runPowerShell(psScript);
     if (!raw) return { supported: true, disks: [] };
     const parsed = JSON.parse(raw);
-    return { supported: true, disks: mapWindowsDisksToModel(parsed) };
+    const mapped = mapWindowsDisksToModel(parsed);
+    // Enrich SMART data via smartctl if installed on the host
+    for (const disk of mapped) {
+      const extSmart = await advancedTools.readSmartWithSmartctl(disk.number);
+      if (extSmart) {
+        disk.smart = {
+          ...disk.smart,
+          ...extSmart,
+        };
+      }
+    }
+    return { supported: true, disks: mapped };
   } catch (err) {
     return { supported: false, disks: [], reason: err.message };
   }
@@ -537,12 +585,12 @@ async function assertNotSystemTarget(op) {
     verifyPartitionByLetter(op, actualPart);
   }
 
-  if (op.type === 'wipe_disk') {
+  if (op.type === 'wipe_disk' || op.type === 'clone_disk' || op.type === 'migrate_os') {
     const status = await runPowerShell(
       `$parts = Get-Partition -DiskNumber ${diskNum} -ErrorAction SilentlyContinue; if ($parts | Where-Object { $_.IsSystem -or $_.IsBoot }) { "SYSTEM" } else { "SAFE" }`
     );
     if (status === 'SYSTEM') {
-      throw new Error(`Protection système : effacement du Disque ${diskNum} bloqué car il contient Windows / la partition d'amorçage.`);
+      throw new Error(`Protection système : opération "${op.type}" sur le Disque ${diskNum} bloquée car il contient Windows / la partition d'amorçage.`);
     }
   }
 
@@ -583,7 +631,33 @@ async function executeOperations(operations, onProgress) {
         percent: Math.round((i / prepared.length) * 100),
       });
 
-      const output = await runPowerShell(command);
+      let output = '';
+      if (op.type === 'wipe_disk' && op.params?.method) {
+        const res = await advancedTools.runDiskWorker('wipe', { diskNumber: op.diskNumber, method: op.params.method }, (ev) => {
+          if (ev.type === 'progress') {
+            onProgress({ index: i, total: prepared.length, operationId: op.id, status: 'running', command: `${command} (${ev.mbPerSec} Mo/s)`, percent: Math.round(ev.percent) });
+          }
+        });
+        output = JSON.stringify(res);
+      } else if (op.type === 'clone_disk') {
+        const res = await advancedTools.runDiskWorker('clone', { sourceDiskNumber: op.params.sourceDiskNumber, targetDiskNumber: op.params.targetDiskNumber ?? op.diskNumber }, (ev) => {
+          if (ev.type === 'progress') {
+            onProgress({ index: i, total: prepared.length, operationId: op.id, status: 'running', command: `${command} (${ev.mbPerSec} Mo/s)`, percent: Math.round(ev.percent) });
+          }
+        });
+        output = JSON.stringify(res);
+      } else if (op.type === 'migrate_os') {
+        const plan = advancedTools.buildMigrateOsCommands(op.params.sourceDiskNumber, op.params.targetDiskNumber ?? op.diskNumber, op.params.targetOsLetter || 'Z', op.params.targetEfiLetter || 'S');
+        await advancedTools.runDiskWorker('clone', { sourceDiskNumber: op.params.sourceDiskNumber, targetDiskNumber: op.params.targetDiskNumber ?? op.diskNumber }, (ev) => {
+          if (ev.type === 'progress') {
+            onProgress({ index: i, total: prepared.length, operationId: op.id, status: 'running', command: `${command} (${ev.mbPerSec} Mo/s)`, percent: Math.round(ev.percent * 0.9) });
+          }
+        });
+        output = await runPowerShell(plan.bcdCommand);
+      } else {
+        output = await runPowerShell(command);
+      }
+
       results.push({ id: op.id, ok: true, command, output });
       onProgress({
         index: i,

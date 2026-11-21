@@ -68,6 +68,7 @@ interface WizardsProps {
     opts: { mode: 'quick' | 'sector'; align4K: boolean; fitMode: 'proportional' | 'original' }
   ) => void;
   onMigrateOs: (targetDiskId: string, align4K: boolean) => void;
+  onBackup: (opts: { engine: 'wbadmin' | 'vhdx'; sourceDrive: string; targetDrive: string; vhdxPath: string; sizeGB: number }) => void;
   onRecoverPartition: (rec: RecoverablePartition) => void;
   onMoveApps: (appIds: string[], targetDrive: string) => void;
   onApplyFinished: (allSucceeded: boolean) => void;
@@ -175,6 +176,13 @@ export const Wizards: React.FC<WizardsProps> = (props) => {
   );
   const [migrateTargetId, setMigrateTargetId] = useState<string>(migrateCandidates[0]?.id || '');
   const [migrateAlign4K, setMigrateAlign4K] = useState<boolean>(true);
+
+  // Backup / Image state (wbadmin or VHDX)
+  const [backupEngine, setBackupEngine] = useState<'wbadmin' | 'vhdx'>('wbadmin');
+  const [backupSource, setBackupSource] = useState<string>('C:');
+  const [backupTarget, setBackupTarget] = useState<string>('F:');
+  const [backupVhdxPath, setBackupVhdxPath] = useState<string>('F:\\Backups\\FClonedisk-OS.vhdx');
+  const [backupSizeGB, setBackupSizeGB] = useState<number>(120);
 
   // Surface Test
   const TOTAL_SECTORS = 192;
@@ -840,14 +848,12 @@ export const Wizards: React.FC<WizardsProps> = (props) => {
                       </select>
                     </div>
                     <div className="form-field">
-                      <label>Algorithme d'effacement</label>
+                      <label>Algorithme d'effacement (FClonedisk.DiskWorker.exe)</label>
                       <select className="select" value={wipeMethod} onChange={(e) => setWipeMethod(e.target.value)}>
                         <option>Remplissage par zéros (1 passe - Rapide)</option>
                         <option>Données aléatoires (1 passe)</option>
                         <option>DoD 5220.22-M (3 passes - Militaire US)</option>
                         <option>DoD 5220.22-ECE (7 passes)</option>
-                        <option>Gutmann (35 passes - Sécurité maximale)</option>
-                        <option>SSD NVMe / ATA Secure Erase</option>
                       </select>
                     </div>
                   </div>
@@ -870,6 +876,78 @@ export const Wizards: React.FC<WizardsProps> = (props) => {
           </>
         );
 
+      case 'backup':
+        return (
+          <>
+            <div className="modal-header">
+              <h2 className="modal-title"><HardDrive size={18} color="var(--accent)" /> Sauvegarde / Image disque (wbadmin ou VHDX)</h2>
+              <button className="btn btn-ghost" aria-label="Fermer" onClick={onClose}><X size={16} /></button>
+            </div>
+            <div className="modal-body">
+              <div className="info-banner">
+                Créez une sauvegarde système Windows (<code>wbadmin</code>) ou une image disque virtuelle <strong>VHDX</strong> dynamique montable directement dans Windows.
+              </div>
+              <div className="form-grid">
+                <div className="form-field">
+                  <label>Moteur de sauvegarde</label>
+                  <select className="select" value={backupEngine} onChange={(e) => setBackupEngine(e.target.value as 'wbadmin' | 'vhdx')}>
+                    <option value="wbadmin">Windows Server Backup (wbadmin -allCritical)</option>
+                    <option value="vhdx">Image virtuelle VHDX (New-VHD + robocopy)</option>
+                  </select>
+                </div>
+                <div className="form-field">
+                  <label>Volume source</label>
+                  <select className="select" value={backupSource} onChange={(e) => setBackupSource(e.target.value)}>
+                    <option value="C:">C: Système</option>
+                    {appDestDrives.map((d) => (
+                      <option key={d.letter} value={d.letter}>{d.letter} {d.label}</option>
+                    ))}
+                  </select>
+                </div>
+                {backupEngine === 'wbadmin' ? (
+                  <div className="form-field">
+                    <label>Lecteur de destination</label>
+                    <select className="select" value={backupTarget} onChange={(e) => setBackupTarget(e.target.value)}>
+                      {appDestDrives.filter((d) => d.letter !== backupSource).map((d) => (
+                        <option key={d.letter} value={d.letter}>{d.letter} {d.label}</option>
+                      ))}
+                    </select>
+                  </div>
+                ) : (
+                  <>
+                    <div className="form-field">
+                      <label>Fichier image (.vhdx)</label>
+                      <input className="input mono" value={backupVhdxPath} onChange={(e) => setBackupVhdxPath(e.target.value)} />
+                    </div>
+                    <div className="form-field">
+                      <label>Taille maximale dynamique (Go)</label>
+                      <input type="number" className="input mono" min={10} max={4096} value={backupSizeGB} onChange={(e) => setBackupSizeGB(Math.max(10, Number(e.target.value) || 64))} />
+                    </div>
+                  </>
+                )}
+              </div>
+            </div>
+            <div className="modal-footer">
+              <button className="btn" onClick={onClose}>Annuler</button>
+              <button
+                className="btn btn-primary"
+                onClick={() => {
+                  props.onBackup({
+                    engine: backupEngine,
+                    sourceDrive: backupSource,
+                    targetDrive: backupTarget,
+                    vhdxPath: backupVhdxPath,
+                    sizeGB: backupSizeGB,
+                  });
+                  onClose();
+                }}
+              >
+                Planifier la sauvegarde
+              </button>
+            </div>
+          </>
+        );
+
       case 'clone_disk':
         return (
           <>
@@ -878,9 +956,9 @@ export const Wizards: React.FC<WizardsProps> = (props) => {
               <button className="btn btn-ghost" aria-label="Fermer" onClick={onClose}><X size={16} /></button>
             </div>
             <div className="modal-body">
-              {!simulationMode && (
-                <div className="warn-banner">Note : le clonage de disque complet s'exécute en Mode Simulation dans cette version.</div>
-              )}
+              <div className="info-banner">
+                Exécuté via le processus séparé <code>FClonedisk.DiskWorker.exe</code> (lecture/écriture brute alignée 4 Mo sur <code>\\.\PhysicalDriveN</code>).
+              </div>
               <div className="form-grid">
                 <div className="form-field">
                   <label>1. Disque Source</label>

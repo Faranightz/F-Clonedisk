@@ -129,7 +129,7 @@ test('1.3 prepareOperations validates the entire queue upfront and rejects all i
   };
   const invalidOp = {
     id: 'op-2',
-    type: 'clone_disk', // unsupported in native Windows mode
+    type: 'merge', // simulation-only operation
     diskNumber: 1,
     diskIdentity: SAMPLE_DISK_IDENTITY,
     params: {},
@@ -264,4 +264,84 @@ test('1.8 .gitignore ignores *.tsbuildinfo and PowerShell injections remain bloc
     () => buildWindowsCommand({ type: 'create', diskNumber: 1, params: { sizeGB: 64, fileSystem: 'FAT32', letter: 'K:', label: 'BigFat' } }),
     /32 Go/
   );
+});
+
+// ---------------------------------------------------------------------------
+// Étape 2 — Modules réels (DiskWorker C#, smartctl, WinPE, wbadmin/VHDX, TestDisk, App Mover)
+// ---------------------------------------------------------------------------
+const advancedTools = require('../electron/advancedTools.cjs');
+
+test('2.1 DiskWorker argument validation for wipe, clone, and surface test', () => {
+  assert.deepEqual(advancedTools.buildWorkerArgs('wipe', { diskNumber: 1, method: 'dod3' }), ['wipe', '--disk', '1', '--method', 'dod3']);
+  assert.deepEqual(advancedTools.buildWorkerArgs('clone', { sourceDiskNumber: 0, targetDiskNumber: 2 }), ['clone', '--src', '0', '--dst', '2']);
+  assert.deepEqual(advancedTools.buildWorkerArgs('surface', { diskNumber: 1, segments: 192 }), ['surface', '--disk', '1', '--segments', '192']);
+
+  assert.throws(() => advancedTools.buildWorkerArgs('wipe', { diskNumber: 1, method: 'gutmann35' }), /non supportée/);
+  assert.throws(() => advancedTools.buildWorkerArgs('clone', { sourceDiskNumber: 1, targetDiskNumber: 1 }), /différents/);
+});
+
+test('2.2 parseSmartctlJson extracts NVMe & ATA SMART telemetry accurately', () => {
+  const nvme = advancedTools.parseSmartctlJson({
+    smart_status: { passed: true },
+    temperature: { current: 41 },
+    power_on_time: { hours: 2150 },
+    power_cycle_count: 340,
+    nvme_smart_health_information_log: {
+      percentage_used: 3,
+      data_units_written: 40000000,
+      media_errors: 0,
+      unsafe_shutdowns: 2,
+    },
+  });
+  assert.equal(nvme.healthPercent, 97);
+  assert.equal(nvme.temperatureC, 41);
+  assert.equal(nvme.powerOnHours, 2150);
+  assert.equal(nvme.totalWrittenTB, 20.48);
+  assert.equal(nvme.wearLevelPercent, 3);
+});
+
+test('2.3 WinPE ADK, wbadmin/VHDX backup, TestDisk parser, and App Mover with rollback', () => {
+  // WinPE blocks C:
+  assert.throws(() => advancedTools.buildWinPeCommands({ mode: 'ufd', usbLetter: 'C:' }), /Protection système/);
+  const winpe = advancedTools.buildWinPeCommands({ mode: 'iso', isoPath: 'D:\\WinPE\\FClonedisk.iso' });
+  assert.match(winpe.commands[0], /copype amd64/);
+  assert.match(winpe.commands[1], /MakeWinPEMedia \/ISO/);
+
+  // Backup wbadmin & VHDX
+  const wb = advancedTools.buildBackupCommand({ engine: 'wbadmin', sourceDrive: 'C:', targetDrive: 'F:' });
+  assert.equal(wb, 'wbadmin start backup -backupTarget:F: -include:C: -allCritical -quiet');
+  const vhdx = advancedTools.buildBackupCommand({ engine: 'vhdx', sourceDrive: 'C:', vhdxPath: 'F:\\Backups\\OS.vhdx', sizeGB: 120 });
+  assert.match(vhdx, /New-VHD -Path 'F:\\Backups\\OS\.vhdx'/);
+  assert.match(vhdx, /Dismount-VHD/);
+
+  // TestDisk log parser
+  const parsedTd = advancedTools.parseTestDiskLog(
+    ' P NTFS                     0  32 33 15665  80 63  251658240 [Ancien_Studio]\n',
+    2
+  );
+  assert.equal(parsedTd.length, 1);
+  assert.equal(parsedTd[0].label, 'Ancien_Studio');
+  assert.equal(parsedTd[0].fileSystem, 'NTFS');
+  assert.equal(parsedTd[0].sizeGB, 120);
+
+  // App Mover blocks C:\Windows and includes automatic rollback on mklink failure
+  assert.throws(() => advancedTools.buildAppMoverScript('C:\\Windows\\System32', 'D:'), /Protection système/);
+  const moveScript = advancedTools.buildAppMoverScript('C:\\Program Files\\Adobe', 'D:');
+  assert.match(moveScript, /robocopy/);
+  assert.match(moveScript, /mklink \/J/);
+  assert.match(moveScript, /rollback automatique/);
+});
+
+// ---------------------------------------------------------------------------
+// Étape 3 — Interface Charte Rapide iT & Polices auto-hébergées
+// ---------------------------------------------------------------------------
+test('3.1 Rapide iT brand palette (#1746D1, #E83E8C, #10213A, #F5F7FC) and self-hosted Manrope/Inter fonts', () => {
+  const css = fs.readFileSync(path.join(process.cwd(), 'src/index.css'), 'utf8');
+  const mainTsx = fs.readFileSync(path.join(process.cwd(), 'src/main.tsx'), 'utf8');
+  assert.match(css, /#1746d1/i);
+  assert.match(css, /#e83e8c/i);
+  assert.match(css, /#10213a/i);
+  assert.match(css, /#f5f7fc/i);
+  assert.match(mainTsx, /@fontsource\/manrope/);
+  assert.match(mainTsx, /@fontsource\/inter/);
 });

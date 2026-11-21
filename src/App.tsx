@@ -82,7 +82,7 @@ const FS_COLOR: Record<FileSystemType, string> = {
 };
 
 export default function App() {
-  const [theme, setTheme] = useState<'dark' | 'light'>('dark');
+  const [theme, setTheme] = useState<'dark' | 'light'>('light');
   const [simulationMode, setSimulationMode] = useState<boolean>(true);
   const [disks, setDisks] = useState<Disk[]>(() => cloneDisks(INITIAL_DISKS));
   const [committedDisks, setCommittedDisks] = useState<Disk[]>(() => cloneDisks(INITIAL_DISKS));
@@ -410,9 +410,9 @@ export default function App() {
           <div>
             <h1 className="brand-title">
               F-Clonedisk
-              <span className="spec-chip ok" style={{ fontSize: 10.5 }}>PRO v1.0</span>
+              <span className="brand-accent-pill">PRO</span>
             </h1>
-            <div className="brand-sub">Gestionnaire de Partitions, Clonage & Create Anything</div>
+            <div className="brand-sub">Gestionnaire de Partitions, Clonage & Sauvegarde — Rapide iT</div>
           </div>
         </div>
 
@@ -587,14 +587,17 @@ export default function App() {
               <button className="sidebar-item" onClick={() => setActiveModal('migrate_os')}>
                 <Cpu size={15} color="var(--accent)" /> Migrer l'OS vers SSD/HDD
               </button>
+              <button className="sidebar-item" onClick={() => setActiveModal('backup')}>
+                <HardDrive size={15} color="var(--accent)" /> Sauvegarde / Image (wbadmin / VHDX)
+              </button>
               <button className="sidebar-item" onClick={() => setActiveModal('recovery')}>
-                <Search size={15} /> Récupération de Partitions
+                <Search size={15} /> Récupération de Partitions (TestDisk)
               </button>
               <button className="sidebar-item" onClick={() => setActiveModal('bootable_media')}>
-                <Disc size={15} /> Créer un média bootable WinPE
+                <Disc size={15} /> Média bootable WinPE (ADK)
               </button>
               <button className="sidebar-item" onClick={() => setActiveModal('app_mover')}>
-                <FolderSync size={15} /> App Mover (Déplacer logiciels)
+                <FolderSync size={15} /> App Mover (robocopy + mklink)
               </button>
               <button className="sidebar-item" onClick={() => setActiveModal('surface_test')}>
                 <Activity size={15} /> Test de surface
@@ -603,7 +606,7 @@ export default function App() {
                 <Gauge size={15} /> S.M.A.R.T. & Benchmark SSD
               </button>
               <button className="sidebar-item danger" onClick={() => setActiveModal('wipe')}>
-                <ShieldAlert size={15} /> SSD Secure Erase / Wipe DoD
+                <ShieldAlert size={15} /> Effacement sécurisé (Zéros / DoD)
               </button>
             </div>
           </div>
@@ -1011,6 +1014,31 @@ export default function App() {
           onMigrateOs={(targetDiskId, align4K) => {
             runSafeOp(() => migrateOsOp(disks, targetDiskId, align4K));
           }}
+          onBackup={(opts) => {
+            const srcDisk = disks.find((d) => d.partitions.some((p) => p.letter === opts.sourceDrive)) || disks[0];
+            if (!srcDisk) return;
+            const cmd =
+              opts.engine === 'wbadmin'
+                ? `wbadmin start backup -backupTarget:${opts.targetDrive} -include:${opts.sourceDrive} -allCritical -quiet`
+                : `New-VHD -Path '${opts.vhdxPath}' -SizeBytes ${Math.round(opts.sizeGB * 1024 ** 3)} -Dynamic ...`;
+            pushState(cloneDisks(disks), {
+              id: uid('op'),
+              type: 'backup_vhdx',
+              diskNumber: srcDisk.number,
+              diskIdentity: buildDiskIdentity(srcDisk),
+              title:
+                opts.engine === 'wbadmin'
+                  ? `Sauvegarde wbadmin ${opts.sourceDrive} → ${opts.targetDrive}`
+                  : `Image VHDX ${opts.sourceDrive} → ${opts.vhdxPath}`,
+              description:
+                opts.engine === 'wbadmin'
+                  ? `Sauvegarde critique Windows vers ${opts.targetDrive}`
+                  : `Création d'image disque virtuelle dynamique (${opts.sizeGB} Go max)`,
+              commandPreview: cmd,
+              params: { ...opts },
+              createdAt: new Date().toLocaleTimeString('fr-FR'),
+            });
+          }}
           onRecoverPartition={(rec: RecoverablePartition) => {
             const next = cloneDisks(disks);
             const d = next.find((x) => x.number === rec.diskNumber);
@@ -1054,6 +1082,7 @@ export default function App() {
           onMoveApps={(appIds, targetDrive) => {
             const moved = MOCK_MOVABLE_APPS.filter((a) => appIds.includes(a.id));
             const totalGB = Number(moved.reduce((s, a) => s + a.sizeGB, 0).toFixed(1));
+            const sourcePaths = moved.map((a) => a.path);
             const next = cloneDisks(disks);
             const sysDisk = next.find((d) => d.partitions.some((p) => p.letter === 'C:')) || next[0];
             for (const d of next) {
@@ -1068,9 +1097,9 @@ export default function App() {
               diskNumber: sysDisk?.number ?? 0,
               diskIdentity: buildDiskIdentity(sysDisk),
               title: `Déplacer ${moved.length} app(s) C: → ${targetDrive}`,
-              description: `${formatSize(totalGB)} libérés sur C: avec jonctions NTFS`,
-              commandPreview: `robocopy "C:\\Program Files\\..." "${targetDrive}\\Apps\\..." /MIR && mklink /J ...`,
-              params: { appIds, targetDrive, totalGB },
+              description: `${formatSize(totalGB)} libérés sur C: avec jonctions NTFS (rollback auto)`,
+              commandPreview: `robocopy "${sourcePaths[0] || 'C:\\Program Files\\...'}" "${targetDrive}\\FClonedisk_Apps\\..." /E /COPYALL && mklink /J`,
+              params: { appIds, sourcePaths, targetDrive, totalGB },
               createdAt: new Date().toLocaleTimeString('fr-FR'),
             });
           }}

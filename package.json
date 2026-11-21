@@ -11,6 +11,7 @@
     "preview": "vite preview",
     "test": "node --test tests/*.test.mjs",
     "electron:dev": "concurrently -k \"vite\" \"wait-on http://localhost:5173 && cross-env ELECTRON_DEV=1 electron .\"",
+    "build:worker": "dotnet publish native/FClonedisk.DiskWorker/FClonedisk.DiskWorker.csproj -c Release -r win-x64 --self-contained true -o electron/bin",
     "build:win": "npm run build && electron-builder --win"
   },
   "build": {
@@ -29,11 +30,15 @@
       "target": [
         {
           "target": "nsis",
-          "arch": ["x64"]
+          "arch": [
+            "x64"
+          ]
         },
         {
           "target": "portable",
-          "arch": ["x64"]
+          "arch": [
+            "x64"
+          ]
         }
       ]
     },
@@ -45,6 +50,8 @@
     }
   },
   "dependencies": {
+    "@fontsource/inter": "^5.3.0",
+    "@fontsource/manrope": "^5.3.0",
     "lucide-react": "^0.511.0",
     "react": "^19.1.0",
     "react-dom": "^19.1.0"

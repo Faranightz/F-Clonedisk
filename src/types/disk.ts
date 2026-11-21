@@ -91,6 +91,7 @@ export type OperationType =
   | 'rebuild_mbr'
   | 'check_partition'
   | 'recover_partition'
+  | 'backup_vhdx'
   | 'app_mover';
 
 export interface PendingOperation {
@@ -125,6 +126,7 @@ export type ActiveModal =
   | 'clone_disk'
   | 'clone_partition'
   | 'migrate_os'
+  | 'backup'
   | 'surface_test'
   | 'smart_bench'
   | 'recovery'
@@ -187,8 +189,23 @@ declare global {
       }>;
       listDisks: () => Promise<{ supported: boolean; disks: Disk[]; reason?: string }>;
       executeOperations: (ops: PendingOperation[]) => Promise<{ cancelled: boolean; results: ExecutionStepResult[] }>;
+      runSurfaceTest: (diskNumber: number, segments?: number) => Promise<unknown>;
+      createWinPe: (opts: { mode: 'iso' | 'ufd'; usbLetter?: string; isoPath?: string }) => Promise<{
+        ok: boolean;
+        adkInstalled: boolean;
+        commands: string[];
+        error?: string;
+      }>;
+      scanTestDisk: (diskNumber: number, customPath?: string) => Promise<{
+        ok: boolean;
+        found: boolean;
+        binaryPath?: string;
+        partitions: RecoverablePartition[];
+        error?: string;
+      }>;
       exportLog: (logText: string) => Promise<{ saved: boolean; path?: string; error?: string }>;
       onProgress: (cb: (payload: ExecutionProgressEvent) => void) => () => void;
+      onWorkerEvent: (cb: (payload: Record<string, unknown>) => void) => () => void;
     };
   }
 }

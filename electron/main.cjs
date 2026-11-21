@@ -104,6 +104,47 @@ ipcMain.handle('disk:executeOperations', async (event, operations) => {
   return { cancelled: false, results };
 });
 
+ipcMain.handle('disk:runSurfaceTest', async (event, payload) => {
+  if (!isTrustedSender(event)) throw new Error('Origine IPC non autorisée.');
+  const advancedTools = require('./advancedTools.cjs');
+  return advancedTools.runDiskWorker('surface', payload || {}, (ev) => {
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('disk:workerEvent', ev);
+    }
+  });
+});
+
+ipcMain.handle('disk:createWinPe', async (event, opts) => {
+  if (!isTrustedSender(event)) throw new Error('Origine IPC non autorisée.');
+  const advancedTools = require('./advancedTools.cjs');
+  const adk = advancedTools.locateWindowsAdkWinPe();
+  const plan = advancedTools.buildWinPeCommands(opts || {});
+  if (!adk) {
+    return {
+      ok: false,
+      adkInstalled: false,
+      commands: plan.commands,
+      error: 'Windows ADK (WinPE Add-on) introuvable. Installez Windows ADK depuis Microsoft Learn puis relancez.',
+    };
+  }
+  return { ok: true, adkInstalled: true, adkBase: adk.adkBase, commands: plan.commands };
+});
+
+ipcMain.handle('disk:scanTestDisk', async (event, payload) => {
+  if (!isTrustedSender(event)) throw new Error('Origine IPC non autorisée.');
+  const advancedTools = require('./advancedTools.cjs');
+  const bin = advancedTools.locateTestDisk(payload?.customPath);
+  if (!bin) {
+    return {
+      ok: false,
+      found: false,
+      partitions: [],
+      error: 'TestDisk introuvable (cherché dans 06_OUTILS_SYSTEME\\Testdisk\\testdisk_win.exe).',
+    };
+  }
+  return { ok: true, found: true, binaryPath: bin, partitions: [] };
+});
+
 ipcMain.handle('disk:exportLog', async (event, logText) => {
   if (!isTrustedSender(event)) throw new Error('Origine IPC non autorisée.');
   if (typeof logText !== 'string' || logText.length > 5 * 1024 * 1024) {
