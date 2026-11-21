@@ -36,7 +36,6 @@ function createWindow() {
     },
   });
 
-  // Block external navigations & popups
   mainWindow.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
   mainWindow.webContents.on('will-navigate', (event, url) => {
     const allowedDev = process.env.ELECTRON_DEV === '1' && url.startsWith('http://localhost:5173');
@@ -77,20 +76,19 @@ ipcMain.handle('disk:listDisks', async (event) => {
 
 ipcMain.handle('disk:executeOperations', async (event, operations) => {
   if (!isTrustedSender(event)) throw new Error('Origine IPC non autorisée.');
-  if (!Array.isArray(operations) || operations.length === 0 || operations.length > 50) {
-    throw new Error('Liste d’opérations invalide.');
-  }
 
-  // Native Electron confirmation before modifying real Windows disks
-  const summary = operations.map((op, i) => `${i + 1}. ${String(op.title || op.type)}`).join('\n');
+  // Validate entire queue and build all real PowerShell commands BEFORE confirmation
+  const prepared = diskBackend.prepareOperations(operations);
+  const detail = diskBackend.formatConfirmationSummary(prepared);
+
   const confirm = await dialog.showMessageBox(mainWindow, {
     type: 'warning',
     buttons: ['Annuler', 'Exécuter sur les disques Windows'],
     defaultId: 0,
     cancelId: 0,
     title: 'Confirmation F-Clonedisk — Modification matérielle',
-    message: `Vous êtes sur le point d'appliquer ${operations.length} opération(s) réelle(s) sur vos disques Windows :`,
-    detail: summary,
+    message: `Vous êtes sur le point d'exécuter ${prepared.length} commande(s) PowerShell réelle(s) :`,
+    detail,
   });
 
   if (confirm.response !== 1) {

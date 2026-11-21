@@ -14,7 +14,8 @@ export type PartitionRole = 'System' | 'Boot' | 'EFI' | 'Recovery' | 'Primary' |
 
 export interface Partition {
   id: string;
-  partitionNumber: number; // 0 for Unallocated
+  partitionNumber: number; // Real Windows PartitionNumber; 0 for Unallocated or pending-new partitions
+  isPendingNew?: boolean; // True when created in queue and not yet assigned a Windows PartitionNumber
   letter: string; // e.g. "C:" or ""
   label: string;
   fileSystem: FileSystemType;
@@ -40,15 +41,26 @@ export interface SmartMetrics {
   wearLevelPercent: number | null;
 }
 
+export interface DiskIdentity {
+  diskNumber: number;
+  model: string;
+  serial: string;
+  uniqueId?: string;
+  sizeBytes: number;
+  sizeGB: number;
+}
+
 export interface Disk {
   id: string;
   number: number;
   model: string;
   serial: string;
+  uniqueId?: string;
   busType: 'NVMe' | 'SATA' | 'USB' | 'SAS';
   mediaType: 'SSD' | 'HDD' | 'Removable';
   partitionStyle: 'GPT' | 'MBR';
   sizeGB: number;
+  sizeBytes?: number;
   status: 'En ligne' | 'Hors ligne';
   health: 'Sain' | 'Avertissement' | 'Critique';
   smart: SmartMetrics;
@@ -85,6 +97,7 @@ export interface PendingOperation {
   id: string;
   type: OperationType;
   diskNumber: number;
+  diskIdentity: DiskIdentity;
   partitionNumber?: number;
   title: string;
   description: string;

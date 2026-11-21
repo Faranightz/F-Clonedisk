@@ -15,6 +15,9 @@ const REAL_WINDOWS_SUPPORTED_OPS = new Set([
 
 const ALLOWED_WINDOWS_FS = new Set(['NTFS', 'FAT32', 'exFAT', 'ReFS']);
 const DRIVE_LETTER_RE = /^[C-Z]$/i;
+// Strict whitelist: ASCII letters, digits, space, hyphen, underscore (max 32 chars).
+// Rejects all quotes (' ‘ ’ ‚ ‛ › ") and PowerShell metacharacters ($ ` ; | &).
+const VOLUME_LABEL_RE = /^[A-Za-z0-9 _-]{0,32}$/;
 
 function runPowerShell(script) {
   return new Promise((resolve, reject) => {
@@ -59,10 +62,22 @@ function sanitizeDriveLetter(raw, required = false) {
   return cleaned;
 }
 
+/**
+ * Strictly validates a volume label: only ASCII letters, digits, space, hyphen, underscore (max 32 chars).
+ * Explicitly rejects straight and typographic quotes (' ‘ ’ ‚ ‛ › ") and PowerShell metacharacters.
+ */
 function sanitizeVolumeLabel(raw) {
-  const str = typeof raw === 'string' ? raw.replace(/[\r\n\t\0]/g, '').slice(0, 32) : '';
-  // Escape single quotes for PowerShell single-quoted literal
-  return str.replace(/'/g, "''");
+  if (raw === undefined || raw === null) return '';
+  if (typeof raw !== 'string') {
+    throw new Error('Nom de volume invalide : chaîne de caractères attendue.');
+  }
+  const trimmed = raw.trim();
+  if (!VOLUME_LABEL_RE.test(trimmed)) {
+    throw new Error(
+      'Nom de volume invalide : seuls les lettres sans accent (A-Z), chiffres (0-9), espaces, tirets (-) et underscores (_) sont autorisés (max 32 caractères, aucun guillemet ni caractère spécial).'
+    );
+  }
+  return trimmed;
 }
 
 function assertAllowedFileSystem(fs, sizeGB) {
@@ -75,6 +90,93 @@ function assertAllowedFileSystem(fs, sizeGB) {
     throw new Error('Format-Volume Windows limite FAT32 à 32 Go maximum en mode natif.');
   }
   return fs;
+}
+
+function validateDiskIdentity(identity, expectedDiskNumber) {
+  if (!identity || typeof identity !== 'object') {
+    throw new Error(`Identité du disque manquante (SerialNumber/UniqueId et taille requis pour Disque ${expectedDiskNumber}).`);
+  }
+  const model = typeof identity.model === 'string' ? identity.model.trim() : '';
+  const serial = typeof identity.serial === 'string' ? identity.serial.trim() : '';
+  const uniqueId = typeof identity.uniqueId === 'string' ? identity.uniqueId.trim() : '';
+  const sizeBytes = Number(identity.sizeBytes);
+  const sizeGB = Number(identity.sizeGB);
+
+  if (!serial && !uniqueId) {
+    throw new Error(`Identité du disque incomplète pour Disque ${expectedDiskNumber} : SerialNumber ou UniqueId requis.`);
+  }
+  if (!Number.isFinite(sizeBytes) || sizeBytes <= 0) {
+    throw new Error(`Identité du disque incomplète pour Disque ${expectedDiskNumber} : taille invalide.`);
+  }
+  return {
+    diskNumber: expectedDiskNumber,
+    model: model || `Disque ${expectedDiskNumber}`,
+    serial: serial || 'N/A',
+    uniqueId,
+    sizeBytes,
+    sizeGB: Number.isFinite(sizeGB) && sizeGB > 0 ? sizeGB : Number((sizeBytes / 1024 ** 3).toFixed(2)),
+  };
+}
+
+/**
+ * Compares the expected disk identity sent by the UI with the live disk returned by Windows.
+ * Throws immediately on any mismatch to prevent acting on a renumbered or swapped drive.
+ */
+function verifyDiskIdentity(expected, actual) {
+  if (!actual || typeof actual !== 'object') {
+    throw new Error(`Disque ${expected.diskNumber} introuvable lors de la vérification d'identité.`);
+  }
+  const expectedUid = (expected.uniqueId || '').trim();
+  const actualUid = (actual.uniqueId || '').trim();
+  if (expectedUid && actualUid && expectedUid !== actualUid) {
+    throw new Error(
+      `Identité du Disque ${expected.diskNumber} modifiée (UniqueId attendu "${expectedUid}", trouvé "${actualUid}"). Exécution bloquée.`
+    );
+  }
+
+  const expectedSerial = (expected.serial || '').trim();
+  const actualSerial = (actual.serial || '').trim();
+  if (expectedSerial && expectedSerial !== 'N/A' && actualSerial && expectedSerial !== actualSerial) {
+    throw new Error(
+      `Numéro de série du Disque ${expected.diskNumber} différent (attendu "${expectedSerial}", trouvé "${actualSerial}"). Exécution bloquée.`
+    );
+  }
+
+  const actualSizeBytes = Number(actual.sizeBytes);
+  const expectedSizeBytes = Number(expected.sizeBytes);
+  const SIZE_TOLERANCE_BYTES = 16 * 1024 * 1024; // 16 MB tolerance for rounding
+  if (
+    !Number.isFinite(actualSizeBytes) ||
+    Math.abs(actualSizeBytes - expectedSizeBytes) > SIZE_TOLERANCE_BYTES
+  ) {
+    throw new Error(
+      `Taille du Disque ${expected.diskNumber} différente (attendue ${expectedSizeBytes} octets, trouvée ${actualSizeBytes} octets). Exécution bloquée.`
+    );
+  }
+}
+
+/**
+ * Verifies a partition retrieved by drive letter against the declared diskNumber and system protection.
+ */
+function verifyPartitionByLetter(op, actualPart) {
+  const letter = sanitizeDriveLetter(
+    op.type === 'letter' ? (op.params.oldLetter || op.params.letter) : op.params.letter,
+    true
+  );
+  if (!actualPart || typeof actualPart !== 'object') {
+    throw new Error(`Partition introuvable pour la lettre ${letter}:.`);
+  }
+  if (Number(actualPart.diskNumber) !== Number(op.diskNumber)) {
+    throw new Error(
+      `Incohérence de disque pour ${letter}: — annoncé sur Disque ${op.diskNumber}, mais réellement sur Disque ${actualPart.diskNumber}. Exécution bloquée.`
+    );
+  }
+  const blocksSystem = op.type === 'format' || op.type === 'letter';
+  if (blocksSystem && (actualPart.isSystem || actualPart.isBoot)) {
+    throw new Error(
+      `Protection système : impossible d'exécuter "${op.type}" sur ${letter}: car cette partition est une partition système/d'amorçage (IsSystem/IsBoot).`
+    );
+  }
 }
 
 /**
@@ -147,7 +249,7 @@ function buildWindowsCommand(op) {
     }
 
     case 'convert_gpt':
-      return `mbr2gpt /convert /disk:${diskNumber} /allowFullOS`;
+      return `mbr2gpt /validate /disk:${diskNumber} /allowFullOS; if ($LASTEXITCODE -ne 0) { throw "Validation MBR2GPT échouée (code $LASTEXITCODE)." }; mbr2gpt /convert /disk:${diskNumber} /allowFullOS`;
 
     case 'check_partition': {
       const letter = sanitizeDriveLetter(params.letter, true);
@@ -163,8 +265,49 @@ function buildWindowsCommand(op) {
 }
 
 /**
+ * Validates the ENTIRE operation queue and builds ALL PowerShell commands before anything executes.
+ * If even one operation is invalid, throws immediately and nothing runs.
+ */
+function prepareOperations(operations) {
+  if (!Array.isArray(operations) || operations.length === 0 || operations.length > 50) {
+    throw new Error('File d’opérations vide ou invalide.');
+  }
+  const prepared = [];
+  for (let i = 0; i < operations.length; i++) {
+    const op = operations[i];
+    const diskNumber = assertNonNegativeInt(op?.diskNumber, `operations[${i}].diskNumber`);
+    const diskIdentity = validateDiskIdentity(op.diskIdentity, diskNumber);
+    const command = buildWindowsCommand(op);
+    prepared.push({ op, diskIdentity, command });
+  }
+  return prepared;
+}
+
+/**
+ * Formats the native Electron confirmation dialog detail showing the real disk model,
+ * serial number, size, and exact PowerShell command (never op.title).
+ */
+function formatConfirmationSummary(preparedOps) {
+  const hasConvertGpt = preparedOps.some((p) => p.op.type === 'convert_gpt');
+  const lines = preparedOps.map((item, idx) => {
+    const id = item.diskIdentity;
+    const serialText = id.serial !== 'N/A' ? id.serial : id.uniqueId || 'Inconnu';
+    return [
+      `${idx + 1}. Disque ${id.diskNumber} — ${id.model} | S/N: ${serialText} | ${id.sizeGB} Go`,
+      `   Commande : ${item.command}`,
+    ].join('\n');
+  });
+  if (hasConvertGpt) {
+    lines.push(
+      '\nIMPORTANT (MBR -> GPT) : passez le BIOS en mode UEFI avant de redémarrer Windows.'
+    );
+  }
+  return lines.join('\n\n');
+}
+
+/**
  * Normalizes raw PowerShell disk JSON into the exact frontend Disk[] schema,
- * including real Unallocated gap calculation from offsets.
+ * including real Unallocated gap calculation from offsets, UniqueId, and SizeBytes.
  */
 function mapWindowsDisksToModel(rawDisks) {
   const arr = Array.isArray(rawDisks) ? rawDisks : rawDisks ? [rawDisks] : [];
@@ -176,8 +319,8 @@ function mapWindowsDisksToModel(rawDisks) {
     const sorted = [...rawParts].sort((a, b) => Number(a.offsetBytes || 0) - Number(b.offsetBytes || 0));
 
     const partitions = [];
-    let cursorBytes = 1024 * 1024; // 1 MB initial alignment offset
-    const MIN_GAP_BYTES = 128 * 1024 * 1024; // Ignore < 128 MB alignment gaps
+    let cursorBytes = 1024 * 1024;
+    const MIN_GAP_BYTES = 128 * 1024 * 1024;
 
     for (const p of sorted) {
       const pOffset = Number(p.offsetBytes || cursorBytes);
@@ -249,11 +392,13 @@ function mapWindowsDisksToModel(rawDisks) {
       id: `win-disk-${diskNum}`,
       number: diskNum,
       model: d.model || `Disque physique ${diskNum}`,
-      serial: d.serial || 'N/A',
+      serial: d.serial ? String(d.serial).trim() : 'N/A',
+      uniqueId: d.uniqueId ? String(d.uniqueId).trim() : '',
       busType: ['NVMe', 'SATA', 'USB', 'SAS'].includes(d.busType) ? d.busType : 'SATA',
       mediaType: d.mediaType === 'HDD' ? 'HDD' : d.busType === 'USB' ? 'Removable' : 'SSD',
       partitionStyle: d.partitionStyle === 'MBR' ? 'MBR' : 'GPT',
       sizeGB: diskSizeGB,
+      sizeBytes: diskSizeBytes,
       status,
       health,
       smart: {
@@ -339,6 +484,7 @@ async function listWindowsDisks() {
         number = $d.Number
         model = $d.FriendlyName
         serial = $d.SerialNumber
+        uniqueId = $d.UniqueId
         busType = "$($d.BusType)"
         mediaType = if ($pDisk) { "$($pDisk.MediaType)" } else { "SSD" }
         partitionStyle = "$($d.PartitionStyle)"
@@ -366,19 +512,41 @@ async function listWindowsDisks() {
   }
 }
 
+async function assertDiskIdentityMatches(diskIdentity) {
+  const diskNum = assertNonNegativeInt(diskIdentity.diskNumber, 'diskNumber');
+  const raw = await runPowerShell(
+    `$d = Get-Disk -Number ${diskNum} -ErrorAction Stop; [PSCustomObject]@{ number=$d.Number; serial=$d.SerialNumber; uniqueId=$d.UniqueId; sizeBytes=$d.Size } | ConvertTo-Json -Compress`
+  );
+  const actual = JSON.parse(raw);
+  verifyDiskIdentity(diskIdentity, actual);
+}
+
 async function assertNotSystemTarget(op) {
-  if (!['wipe_disk', 'delete', 'format'].includes(op.type)) return;
   const diskNum = assertNonNegativeInt(op.diskNumber, 'diskNumber');
-  const checkScript = `
-    $parts = Get-Partition -DiskNumber ${diskNum} -ErrorAction SilentlyContinue
-    $sys = $parts | Where-Object { $_.IsSystem -or $_.IsBoot }
-    if ($sys) { "SYSTEM" } else { "SAFE" }
-  `;
-  const status = await runPowerShell(checkScript);
-  if (op.type === 'wipe_disk' && status === 'SYSTEM') {
-    throw new Error(`Protection système : effacement du Disque ${diskNum} bloqué car il contient Windows / la partition d'amorçage.`);
+
+  // For format, letter removal/change, label, and check_partition: look up by DriveLetter
+  if (op.type === 'format' || op.type === 'label' || op.type === 'check_partition' || (op.type === 'letter' && op.params?.oldLetter)) {
+    const letter = sanitizeDriveLetter(
+      op.type === 'letter' ? op.params.oldLetter : op.params.letter,
+      true
+    );
+    const raw = await runPowerShell(
+      `$p = Get-Partition -DriveLetter ${letter} -ErrorAction Stop; [PSCustomObject]@{ diskNumber=$p.DiskNumber; partitionNumber=$p.PartitionNumber; isSystem=$p.IsSystem; isBoot=$p.IsBoot } | ConvertTo-Json -Compress`
+    );
+    const actualPart = JSON.parse(raw);
+    verifyPartitionByLetter(op, actualPart);
   }
-  if ((op.type === 'delete' || op.type === 'format') && op.partitionNumber) {
+
+  if (op.type === 'wipe_disk') {
+    const status = await runPowerShell(
+      `$parts = Get-Partition -DiskNumber ${diskNum} -ErrorAction SilentlyContinue; if ($parts | Where-Object { $_.IsSystem -or $_.IsBoot }) { "SYSTEM" } else { "SAFE" }`
+    );
+    if (status === 'SYSTEM') {
+      throw new Error(`Protection système : effacement du Disque ${diskNum} bloqué car il contient Windows / la partition d'amorçage.`);
+    }
+  }
+
+  if ((op.type === 'delete' || op.type === 'letter') && op.partitionNumber) {
     const pNum = assertPositiveInt(op.partitionNumber, 'partitionNumber');
     const pCheck = await runPowerShell(
       `$p = Get-Partition -DiskNumber ${diskNum} -PartitionNumber ${pNum} -ErrorAction SilentlyContinue; if ($p -and ($p.IsSystem -or $p.IsBoot)) { "SYSTEM" } else { "SAFE" }`
@@ -394,44 +562,48 @@ async function executeOperations(operations, onProgress) {
     throw new Error('Exécution réelle disponible uniquement sous Windows en mode Administrateur.');
   }
 
+  // Step 1.3: Validate ALL operations and build ALL commands BEFORE running anything
+  const prepared = prepareOperations(operations);
+
   const results = [];
-  for (let i = 0; i < operations.length; i++) {
-    const op = operations[i];
-    let cmd = '';
+  for (let i = 0; i < prepared.length; i++) {
+    const { op, diskIdentity, command } = prepared[i];
     try {
-      cmd = buildWindowsCommand(op);
+      // Step 1.2: Re-verify live disk identity (UniqueId/SerialNumber/Size) right before execution
+      await assertDiskIdentityMatches(diskIdentity);
+      // Step 1.5: Verify system partition & letter-to-disk consistency right before execution
       await assertNotSystemTarget(op);
 
       onProgress({
         index: i,
-        total: operations.length,
+        total: prepared.length,
         operationId: op.id,
         status: 'running',
-        command: cmd,
-        percent: Math.round((i / operations.length) * 100),
+        command,
+        percent: Math.round((i / prepared.length) * 100),
       });
 
-      const output = await runPowerShell(cmd);
-      results.push({ id: op.id, ok: true, command: cmd, output });
+      const output = await runPowerShell(command);
+      results.push({ id: op.id, ok: true, command, output });
       onProgress({
         index: i,
-        total: operations.length,
+        total: prepared.length,
         operationId: op.id,
         status: 'done',
-        command: cmd,
+        command,
         output,
-        percent: Math.round(((i + 1) / operations.length) * 100),
+        percent: Math.round(((i + 1) / prepared.length) * 100),
       });
     } catch (err) {
-      results.push({ id: op.id, ok: false, command: cmd || op.type, error: err.message });
+      results.push({ id: op.id, ok: false, command, error: err.message });
       onProgress({
         index: i,
-        total: operations.length,
+        total: prepared.length,
         operationId: op.id,
         status: 'error',
-        command: cmd || op.type,
+        command,
         error: err.message,
-        percent: Math.round(((i + 1) / operations.length) * 100),
+        percent: Math.round(((i + 1) / prepared.length) * 100),
       });
       break;
     }
@@ -441,7 +613,13 @@ async function executeOperations(operations, onProgress) {
 
 module.exports = {
   REAL_WINDOWS_SUPPORTED_OPS,
+  sanitizeVolumeLabel,
+  validateDiskIdentity,
+  verifyDiskIdentity,
+  verifyPartitionByLetter,
   buildWindowsCommand,
+  prepareOperations,
+  formatConfirmationSummary,
   mapWindowsDisksToModel,
   getSystemInfo,
   listWindowsDisks,

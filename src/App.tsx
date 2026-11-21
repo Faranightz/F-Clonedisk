@@ -44,6 +44,8 @@ import type {
 import { INITIAL_DISKS, MOCK_MOVABLE_APPS } from './data/mockDisks';
 import {
   allocateFreeSpaceOp,
+  assertPartitionHasRealNumber,
+  buildDiskIdentity,
   cloneDiskOp,
   cloneDisks,
   createPartitionOp,
@@ -253,105 +255,130 @@ export default function App() {
     const next = cloneDisks(disks);
     const d = next.find((x) => x.id === selectedDisk.id)!;
     const p = selectedPartition ? d.partitions.find((x) => x.id === selectedPartition.id) : undefined;
+    const diskIdentity = buildDiskIdentity(d);
 
-    if (action === 'convert_style') {
-      const targetStyle = d.partitionStyle === 'GPT' ? 'MBR' : 'GPT';
-      d.partitionStyle = targetStyle;
-      pushState(next, {
-        id: uid('op'),
-        type: targetStyle === 'GPT' ? 'convert_gpt' : 'convert_mbr',
-        diskNumber: d.number,
-        title: `Convertir Disque ${d.number} en ${targetStyle}`,
-        description: `Conversion sans perte de données vers table ${targetStyle}`,
-        commandPreview:
-          targetStyle === 'GPT' ? `mbr2gpt /convert /disk:${d.number} /allowFullOS` : `# F-Clonedisk: Convert-DiskToMBR -DiskNumber ${d.number}`,
-        params: { targetStyle },
-        createdAt: new Date().toLocaleTimeString('fr-FR'),
-      });
-    } else if (action === 'align_4k') {
-      if (p) p.aligned4K = true;
-      else d.partitions.forEach((x) => (x.aligned4K = true));
-      pushState(next, {
-        id: uid('op'),
-        type: 'align_4k',
-        diskNumber: d.number,
-        partitionNumber: p?.partitionNumber,
-        title: p ? `Alignement 4K sur ${p.letter || p.label}` : `Alignement 4K Disque ${d.number}`,
-        description: 'Optimisation des secteurs sur frontière 4096 octets (SSD)',
-        commandPreview: `# F-Clonedisk 4K Align: Disk ${d.number}${p ? ` Partition ${p.partitionNumber}` : ''}`,
-        params: {},
-        createdAt: new Date().toLocaleTimeString('fr-FR'),
-      });
-    } else if (action === 'convert_fs' && p) {
-      const targetFs: FileSystemType = p.fileSystem === 'NTFS' ? 'FAT32' : 'NTFS';
-      p.fileSystem = targetFs;
-      pushState(next, {
-        id: uid('op'),
-        type: 'convert_fs',
-        diskNumber: d.number,
-        partitionNumber: p.partitionNumber,
-        title: `Convertir ${p.letter || p.label} en ${targetFs}`,
-        description: `Conversion système de fichiers sans formatage vers ${targetFs}`,
-        commandPreview: targetFs === 'NTFS' ? `convert ${p.letter} /fs:ntfs` : `# F-Clonedisk NTFS-to-FAT32: ${p.letter}`,
-        params: { targetFs },
-        createdAt: new Date().toLocaleTimeString('fr-FR'),
-      });
-    } else if (action === 'hide' && p) {
-      p.isHidden = !p.isHidden;
-      pushState(next, {
-        id: uid('op'),
-        type: 'hide',
-        diskNumber: d.number,
-        partitionNumber: p.partitionNumber,
-        title: `${p.isHidden ? 'Masquer' : 'Afficher'} ${p.letter || p.label}`,
-        description: p.isHidden ? 'Partition masquée dans l’Explorateur Windows' : 'Partition rendue visible',
-        commandPreview: `Set-Partition -DiskNumber ${d.number} -PartitionNumber ${p.partitionNumber} -IsHidden $${p.isHidden}`,
-        params: { isHidden: p.isHidden },
-        createdAt: new Date().toLocaleTimeString('fr-FR'),
-      });
-    } else if (action === 'active' && p) {
-      d.partitions.forEach((x) => (x.isActive = false));
-      p.isActive = true;
-      pushState(next, {
-        id: uid('op'),
-        type: 'set_active',
-        diskNumber: d.number,
-        partitionNumber: p.partitionNumber,
-        title: `Définir ${p.letter || p.label} Active`,
-        description: `Marquer comme partition d'amorçage active sur Disque ${d.number}`,
-        commandPreview: `Set-Partition -DiskNumber ${d.number} -PartitionNumber ${p.partitionNumber} -IsActive $true`,
-        params: {},
-        createdAt: new Date().toLocaleTimeString('fr-FR'),
-      });
-    } else if (action === 'check' && p) {
-      if (!p.letter) {
-        showToast('Impossible de lancer Repair-Volume : cette partition n’a pas de lettre de lecteur.');
-        return;
+    try {
+      if (action === 'convert_style') {
+        const targetStyle = d.partitionStyle === 'GPT' ? 'MBR' : 'GPT';
+        d.partitionStyle = targetStyle;
+        pushState(next, {
+          id: uid('op'),
+          type: targetStyle === 'GPT' ? 'convert_gpt' : 'convert_mbr',
+          diskNumber: d.number,
+          diskIdentity,
+          title: `Convertir Disque ${d.number} en ${targetStyle}`,
+          description:
+            targetStyle === 'GPT'
+              ? 'Validation mbr2gpt /validate puis conversion GPT — passez le BIOS en mode UEFI avant de redémarrer'
+              : `Conversion sans perte de données vers table ${targetStyle}`,
+          commandPreview:
+            targetStyle === 'GPT'
+              ? `mbr2gpt /validate /disk:${d.number} /allowFullOS && mbr2gpt /convert /disk:${d.number} /allowFullOS`
+              : `# F-Clonedisk: Convert-DiskToMBR -DiskNumber ${d.number}`,
+          params: { targetStyle },
+          createdAt: new Date().toLocaleTimeString('fr-FR'),
+        });
+      } else if (action === 'align_4k') {
+        if (p) {
+          assertPartitionHasRealNumber(p);
+          p.aligned4K = true;
+        } else {
+          d.partitions.forEach((x) => (x.aligned4K = true));
+        }
+        pushState(next, {
+          id: uid('op'),
+          type: 'align_4k',
+          diskNumber: d.number,
+          diskIdentity,
+          partitionNumber: p?.partitionNumber,
+          title: p ? `Alignement 4K sur ${p.letter || p.label}` : `Alignement 4K Disque ${d.number}`,
+          description: 'Optimisation des secteurs sur frontière 4096 octets (SSD)',
+          commandPreview: `# F-Clonedisk 4K Align: Disk ${d.number}${p ? ` Partition ${p.partitionNumber}` : ''}`,
+          params: {},
+          createdAt: new Date().toLocaleTimeString('fr-FR'),
+        });
+      } else if (action === 'convert_fs' && p) {
+        assertPartitionHasRealNumber(p);
+        const targetFs: FileSystemType = p.fileSystem === 'NTFS' ? 'FAT32' : 'NTFS';
+        p.fileSystem = targetFs;
+        pushState(next, {
+          id: uid('op'),
+          type: 'convert_fs',
+          diskNumber: d.number,
+          diskIdentity,
+          partitionNumber: p.partitionNumber,
+          title: `Convertir ${p.letter || p.label} en ${targetFs}`,
+          description: `Conversion système de fichiers sans formatage vers ${targetFs}`,
+          commandPreview: targetFs === 'NTFS' ? `convert ${p.letter} /fs:ntfs` : `# F-Clonedisk NTFS-to-FAT32: ${p.letter}`,
+          params: { targetFs },
+          createdAt: new Date().toLocaleTimeString('fr-FR'),
+        });
+      } else if (action === 'hide' && p) {
+        assertPartitionHasRealNumber(p);
+        p.isHidden = !p.isHidden;
+        pushState(next, {
+          id: uid('op'),
+          type: 'hide',
+          diskNumber: d.number,
+          diskIdentity,
+          partitionNumber: p.partitionNumber,
+          title: `${p.isHidden ? 'Masquer' : 'Afficher'} ${p.letter || p.label}`,
+          description: p.isHidden ? 'Partition masquée dans l’Explorateur Windows' : 'Partition rendue visible',
+          commandPreview: `Set-Partition -DiskNumber ${d.number} -PartitionNumber ${p.partitionNumber} -IsHidden $${p.isHidden}`,
+          params: { isHidden: p.isHidden },
+          createdAt: new Date().toLocaleTimeString('fr-FR'),
+        });
+      } else if (action === 'active' && p) {
+        assertPartitionHasRealNumber(p);
+        d.partitions.forEach((x) => (x.isActive = false));
+        p.isActive = true;
+        pushState(next, {
+          id: uid('op'),
+          type: 'set_active',
+          diskNumber: d.number,
+          diskIdentity,
+          partitionNumber: p.partitionNumber,
+          title: `Définir ${p.letter || p.label} Active`,
+          description: `Marquer comme partition d'amorçage active sur Disque ${d.number}`,
+          commandPreview: `Set-Partition -DiskNumber ${d.number} -PartitionNumber ${p.partitionNumber} -IsActive $true`,
+          params: {},
+          createdAt: new Date().toLocaleTimeString('fr-FR'),
+        });
+      } else if (action === 'check' && p) {
+        assertPartitionHasRealNumber(p);
+        if (!p.letter) {
+          showToast('Impossible de lancer Repair-Volume : cette partition n’a pas de lettre de lecteur.');
+          return;
+        }
+        pushState(next, {
+          id: uid('op'),
+          type: 'check_partition',
+          diskNumber: d.number,
+          diskIdentity,
+          partitionNumber: p.partitionNumber,
+          title: `Vérifier & Réparer ${p.letter}`,
+          description: 'Vérification du système de fichiers (Repair-Volume -Scan)',
+          commandPreview: `Repair-Volume -DriveLetter ${p.letter.replace(':', '')} -Scan`,
+          params: { letter: p.letter },
+          createdAt: new Date().toLocaleTimeString('fr-FR'),
+        });
+      } else if (action === 'rebuild_mbr') {
+        pushState(next, {
+          id: uid('op'),
+          type: 'rebuild_mbr',
+          diskNumber: d.number,
+          diskIdentity,
+          title: `Reconstruire le MBR (Disque ${d.number})`,
+          description: 'Réécriture du secteur d’amorçage principal Windows 10/11',
+          commandPreview: `bootrec /fixmbr && bootrec /fixboot # Disk ${d.number}`,
+          params: {},
+          createdAt: new Date().toLocaleTimeString('fr-FR'),
+        });
+      } else if (action === 'delete' && p) {
+        runSafeOp(() => deletePartitionOp(disks, d.id, p.id));
       }
-      pushState(next, {
-        id: uid('op'),
-        type: 'check_partition',
-        diskNumber: d.number,
-        partitionNumber: p.partitionNumber,
-        title: `Vérifier & Réparer ${p.letter}`,
-        description: 'Vérification du système de fichiers (Repair-Volume -Scan)',
-        commandPreview: `Repair-Volume -DriveLetter ${p.letter.replace(':', '')} -Scan`,
-        params: { letter: p.letter },
-        createdAt: new Date().toLocaleTimeString('fr-FR'),
-      });
-    } else if (action === 'rebuild_mbr') {
-      pushState(next, {
-        id: uid('op'),
-        type: 'rebuild_mbr',
-        diskNumber: d.number,
-        title: `Reconstruire le MBR (Disque ${d.number})`,
-        description: 'Réécriture du secteur d’amorçage principal Windows 10/11',
-        commandPreview: `bootrec /fixmbr && bootrec /fixboot # Disk ${d.number}`,
-        params: {},
-        createdAt: new Date().toLocaleTimeString('fr-FR'),
-      });
-    } else if (action === 'delete' && p) {
-      runSafeOp(() => deletePartitionOp(disks, d.id, p.id));
+    } catch (err) {
+      showToast((err as Error).message || 'Opération impossible.');
     }
   };
 
@@ -885,6 +912,12 @@ export default function App() {
           }}
           onChangeLetter={(newLetter) => {
             if (!selectedDisk || !selectedPartition) return;
+            try {
+              assertPartitionHasRealNumber(selectedPartition);
+            } catch (err) {
+              showToast((err as Error).message);
+              return;
+            }
             const next = cloneDisks(disks);
             const d = next.find((x) => x.id === selectedDisk.id)!;
             const p = d.partitions.find((x) => x.id === selectedPartition.id)!;
@@ -894,6 +927,7 @@ export default function App() {
               id: uid('op'),
               type: 'letter',
               diskNumber: d.number,
+              diskIdentity: buildDiskIdentity(d),
               partitionNumber: p.partitionNumber,
               title: `Changer lettre → ${newLetter || '(Aucune)'}`,
               description: `Modification de la lettre de lecteur pour ${p.label}`,
@@ -906,6 +940,12 @@ export default function App() {
           }}
           onChangeLabel={(newLabel) => {
             if (!selectedDisk || !selectedPartition) return;
+            try {
+              assertPartitionHasRealNumber(selectedPartition);
+            } catch (err) {
+              showToast((err as Error).message);
+              return;
+            }
             if (!selectedPartition.letter && !simulationMode) {
               showToast('Impossible de renommer sous Windows natif sans lettre de lecteur.');
               return;
@@ -918,10 +958,11 @@ export default function App() {
               id: uid('op'),
               type: 'label',
               diskNumber: d.number,
+              diskIdentity: buildDiskIdentity(d),
               partitionNumber: p.partitionNumber,
               title: `Renommer ${p.letter || 'volume'} → "${newLabel}"`,
               description: `Nouveau nom de volume sur Disque ${d.number}`,
-              commandPreview: `Set-Volume -DriveLetter ${(p.letter || 'C').replace(':', '')} -NewFileSystemLabel '${newLabel.replace(/'/g, "''")}'`,
+              commandPreview: `Set-Volume -DriveLetter ${(p.letter || 'C').replace(':', '')} -NewFileSystemLabel '${newLabel}'`,
               params: { newLabel, letter: p.letter },
               createdAt: new Date().toLocaleTimeString('fr-FR'),
             });
@@ -955,6 +996,7 @@ export default function App() {
                 id: uid('op'),
                 type: 'wipe_disk',
                 diskNumber: d.number,
+                diskIdentity: buildDiskIdentity(d),
                 title: `Effacer Disque ${d.number} (${method.split(' ')[0]})`,
                 description: `Effacement complet de ${d.model} avec ${method}`,
                 commandPreview: `Clear-Disk -Number ${d.number} -RemoveData -RemoveOEM -Confirm:$false`,
@@ -982,6 +1024,7 @@ export default function App() {
               const restored: Partition = {
                 id: uid('rec'),
                 partitionNumber: 0,
+                isPendingNew: true,
                 letter,
                 label: rec.label,
                 fileSystem: rec.fileSystem,
@@ -1000,6 +1043,7 @@ export default function App() {
               id: uid('op'),
               type: 'recover_partition',
               diskNumber: rec.diskNumber,
+              diskIdentity: buildDiskIdentity(d),
               title: `Restaurer partition "${rec.label}" (${letter})`,
               description: `${rec.filesCount.toLocaleString('fr-FR')} fichiers restaurés sur Disque ${rec.diskNumber}`,
               commandPreview: `# F-Clonedisk Recovery: RestorePartition --disk=${rec.diskNumber} --label="${rec.label}" --letter=${letter}`,
@@ -1011,6 +1055,7 @@ export default function App() {
             const moved = MOCK_MOVABLE_APPS.filter((a) => appIds.includes(a.id));
             const totalGB = Number(moved.reduce((s, a) => s + a.sizeGB, 0).toFixed(1));
             const next = cloneDisks(disks);
+            const sysDisk = next.find((d) => d.partitions.some((p) => p.letter === 'C:')) || next[0];
             for (const d of next) {
               for (const p of d.partitions) {
                 if (p.letter === 'C:') p.usedGB = Math.max(20, Number((p.usedGB - totalGB).toFixed(1)));
@@ -1020,7 +1065,8 @@ export default function App() {
             pushState(next, {
               id: uid('op'),
               type: 'app_mover',
-              diskNumber: 0,
+              diskNumber: sysDisk?.number ?? 0,
+              diskIdentity: buildDiskIdentity(sysDisk),
               title: `Déplacer ${moved.length} app(s) C: → ${targetDrive}`,
               description: `${formatSize(totalGB)} libérés sur C: avec jonctions NTFS`,
               commandPreview: `robocopy "C:\\Program Files\\..." "${targetDrive}\\Apps\\..." /MIR && mklink /J ...`,

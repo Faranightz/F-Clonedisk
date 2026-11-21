@@ -1331,6 +1331,11 @@ export const Wizards: React.FC<WizardsProps> = (props) => {
                       ? 'Mode Simulation actif : les opérations seront exécutées sur la topologie virtuelle sans toucher à vos disques physiques.'
                       : 'Mode Windows Réel actif : une boîte de confirmation Administrateur native vous sera demandée avant toute écriture sur vos disques physiques.'}
                   </div>
+                  {pendingOps.some((op) => op.type === 'convert_gpt') && (
+                    <div className="warn-banner">
+                      <strong>Important (MBR → GPT) :</strong> passez le BIOS en mode <strong>UEFI</strong> avant de redémarrer Windows (validation <code>mbr2gpt /validate</code> exécutée automatiquement avant <code>/convert</code>).
+                    </div>
+                  )}
                   <div style={{ display: 'flex', flexDirection: 'column', gap: 6, maxHeight: 220, overflowY: 'auto' }}>
                     {pendingOps.map((op, i) => (
                       <div key={op.id} style={{ padding: '8px 10px', borderRadius: 6, background: 'var(--bg-surface)', border: '1px solid var(--border-subtle)' }}>

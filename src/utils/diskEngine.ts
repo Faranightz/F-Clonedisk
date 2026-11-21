@@ -1,7 +1,26 @@
-import type { Disk, FileSystemType, Partition, PartitionRole, PendingOperation } from '../types/disk';
+import type { Disk, DiskIdentity, FileSystemType, Partition, PartitionRole, PendingOperation } from '../types/disk';
 
 export function cloneDisks(disks: Disk[]): Disk[] {
   return JSON.parse(JSON.stringify(disks));
+}
+
+export function buildDiskIdentity(disk: Disk): DiskIdentity {
+  return {
+    diskNumber: disk.number,
+    model: disk.model,
+    serial: disk.serial,
+    uniqueId: disk.uniqueId || '',
+    sizeBytes: disk.sizeBytes ?? Math.round(disk.sizeGB * 1024 ** 3),
+    sizeGB: disk.sizeGB,
+  };
+}
+
+export function assertPartitionHasRealNumber(part: Partition): void {
+  if (part.isPendingNew || part.partitionNumber <= 0) {
+    throw new Error(
+      "Cette partition vient d'être créée dans la file d'attente et n'a pas encore de PartitionNumber Windows. Appliquez d'abord la création puis actualisez les disques avant d'enchaîner une autre opération dessus."
+    );
+  }
 }
 
 export function getUsedLetters(disks: Disk[]): Set<string> {
@@ -25,8 +44,9 @@ export function getAvailableLetters(disks: Disk[]): string[] {
 }
 
 /**
- * Merges adjacent Unallocated blocks and numbers ONLY real partitions (1..N).
- * Unallocated blocks always keep partitionNumber = 0 so Windows partition indices never shift.
+ * Merges adjacent Unallocated blocks while STRICTLY preserving every real Windows partitionNumber.
+ * NEVER renumbers partitions by array position.
+ * Unallocated and newly queued (isPendingNew) partitions keep partitionNumber = 0.
  */
 export function normalizePartitions(partitions: Partition[]): Partition[] {
   const merged: Partition[] = [];
@@ -38,19 +58,13 @@ export function normalizePartitions(partitions: Partition[]): Partition[] {
     } else {
       merged.push({
         ...p,
+        partitionNumber: p.fileSystem === 'Unallocated' || p.isPendingNew ? 0 : p.partitionNumber,
         sizeGB: Number(p.sizeGB.toFixed(2)),
         usedGB: Number(Math.min(p.usedGB, p.sizeGB).toFixed(2)),
       });
     }
   }
-  let realIdx = 0;
-  return merged.map((p) => {
-    if (p.fileSystem === 'Unallocated') {
-      return { ...p, partitionNumber: 0 };
-    }
-    realIdx += 1;
-    return { ...p, partitionNumber: realIdx };
-  });
+  return merged;
 }
 
 export function uid(prefix: string): string {
@@ -99,6 +113,7 @@ export function createPartitionOp(
   const newPart: Partition = {
     id: uid('part'),
     partitionNumber: 0,
+    isPendingNew: true,
     letter: opts.fileSystem.startsWith('EXT') || opts.fileSystem === 'LinuxSwap' ? '' : opts.letter,
     label: opts.label || 'Nouveau volume',
     fileSystem: opts.fileSystem,
@@ -132,6 +147,7 @@ export function createPartitionOp(
     id: uid('op'),
     type: 'create',
     diskNumber: disk.number,
+    diskIdentity: buildDiskIdentity(disk),
     title: `Créer partition ${newPart.letter || newPart.label} (${opts.fileSystem})`,
     description: `Créer une partition ${opts.fileSystem} de ${formatSize(actualSize)} sur Disque ${disk.number} (${newPart.label})`,
     commandPreview: `New-Partition -DiskNumber ${disk.number} -Size ${Math.round(actualSize * 1024)}MB ${newPart.letter ? `-DriveLetter ${newPart.letter.replace(':', '')}` : '-AssignDriveLetter'} | Format-Volume -FileSystem ${opts.fileSystem} -NewFileSystemLabel '${newPart.label}'`,
@@ -156,8 +172,9 @@ export function resizePartitionOp(
 
   const part = disk.partitions[idx];
   if (part.fileSystem === 'Unallocated') throw new Error('Impossible de redimensionner un espace non alloué.');
+  assertPartitionHasRealNumber(part);
 
-  const partNumBefore = part.partitionNumber;
+  const realPartNum = part.partitionNumber;
   const oldSize = part.sizeGB;
   const minAllowed = Number(Math.max(part.usedGB + 0.5, 0.5).toFixed(2));
   const clampedTarget = Math.max(minAllowed, Number(newSizeGB.toFixed(2)));
@@ -200,10 +217,11 @@ export function resizePartitionOp(
     id: uid('op'),
     type: 'resize',
     diskNumber: disk.number,
-    partitionNumber: partNumBefore,
+    diskIdentity: buildDiskIdentity(disk),
+    partitionNumber: realPartNum,
     title: `Redimensionner ${part.letter || part.label}`,
     description: `${formatSize(oldSize)} → ${formatSize(part.sizeGB)} sur Disque ${disk.number}`,
-    commandPreview: `Resize-Partition -DiskNumber ${disk.number} -PartitionNumber ${partNumBefore} -Size ${Math.round(part.sizeGB * 1024)}MB`,
+    commandPreview: `Resize-Partition -DiskNumber ${disk.number} -PartitionNumber ${realPartNum} -Size ${Math.round(part.sizeGB * 1024)}MB`,
     params: { oldSizeGB: oldSize, newSizeGB: part.sizeGB },
     createdAt: new Date().toLocaleTimeString('fr-FR'),
   };
@@ -223,6 +241,7 @@ export function formatPartitionOp(
   const part = disk.partitions.find((p) => p.id === partId);
   if (!part) throw new Error('Partition introuvable.');
   if (part.isSystem) throw new Error('Protection système : impossible de formater la partition OS.');
+  assertPartitionHasRealNumber(part);
 
   const origLetter = part.letter;
   part.fileSystem = opts.fileSystem;
@@ -237,6 +256,7 @@ export function formatPartitionOp(
     id: uid('op'),
     type: 'format',
     diskNumber: disk.number,
+    diskIdentity: buildDiskIdentity(disk),
     partitionNumber: part.partitionNumber,
     title: `Formater ${origLetter || part.label} en ${opts.fileSystem}`,
     description: `Formatage ${opts.quick ? 'rapide' : 'complet'} (${opts.fileSystem}, cluster ${opts.clusterSize})`,
@@ -262,6 +282,7 @@ export function deletePartitionOp(
 
   const part = disk.partitions[idx];
   if (part.isSystem) throw new Error('Protection système : impossible de supprimer une partition système.');
+  assertPartitionHasRealNumber(part);
 
   const labelRef = part.letter || part.label;
   const origPartNum = part.partitionNumber;
@@ -283,6 +304,7 @@ export function deletePartitionOp(
     id: uid('op'),
     type: wipeMethod ? 'wipe_partition' : 'delete',
     diskNumber: disk.number,
+    diskIdentity: buildDiskIdentity(disk),
     partitionNumber: origPartNum,
     title: wipeMethod ? `Effacer définitivement ${labelRef}` : `Supprimer partition ${labelRef}`,
     description: wipeMethod
@@ -313,6 +335,8 @@ export function splitPartitionOp(
   if (idx === -1) throw new Error('Partition introuvable.');
 
   const part = disk.partitions[idx];
+  assertPartitionHasRealNumber(part);
+
   const maxSplit = Number((part.sizeGB - Math.max(part.usedGB + 2, 1)).toFixed(2));
   if (maxSplit < 1) {
     throw new Error('Espace libre insuffisant pour diviser cette partition (minimum 1 Go libre requis).');
@@ -324,6 +348,7 @@ export function splitPartitionOp(
   const created: Partition = {
     id: uid('part'),
     partitionNumber: 0,
+    isPendingNew: true,
     letter: newLetter,
     label: newLabel || 'Partition divisée',
     fileSystem: part.fileSystem,
@@ -340,6 +365,7 @@ export function splitPartitionOp(
     id: uid('op'),
     type: 'split',
     diskNumber: disk.number,
+    diskIdentity: buildDiskIdentity(disk),
     partitionNumber: part.partitionNumber,
     title: `Diviser ${part.letter || part.label} → ${newLetter || created.label}`,
     description: `Nouvelle partition de ${formatSize(splitSize)} créée depuis ${part.letter || part.label}`,
@@ -366,6 +392,8 @@ export function mergePartitionsOp(
 
   const target = disk.partitions[tIdx];
   const source = disk.partitions[sIdx];
+  assertPartitionHasRealNumber(target);
+  if (source.fileSystem !== 'Unallocated') assertPartitionHasRealNumber(source);
   if (source.isSystem) throw new Error('Impossible de fusionner une partition système en tant que source.');
   const sourceName = source.letter || source.label;
 
@@ -378,6 +406,7 @@ export function mergePartitionsOp(
     id: uid('op'),
     type: 'merge',
     diskNumber: disk.number,
+    diskIdentity: buildDiskIdentity(disk),
     title: `Fusionner ${sourceName} dans ${target.letter || target.label}`,
     description: `Capacité totale résultante : ${formatSize(target.sizeGB)} sur Disque ${disk.number}`,
     commandPreview: `# F-Clonedisk Merge Engine: ${sourceName} -> ${target.letter || target.label}`,
@@ -401,6 +430,8 @@ export function allocateFreeSpaceOp(
   const from = disk.partitions.find((p) => p.id === fromPartId);
   const to = disk.partitions.find((p) => p.id === toPartId);
   if (!from || !to) throw new Error('Partition introuvable.');
+  assertPartitionHasRealNumber(from);
+  assertPartitionHasRealNumber(to);
 
   const maxFree = Math.max(0, from.sizeGB - from.usedGB - 1);
   const transfer = Number(Math.min(amountGB, maxFree).toFixed(2));
@@ -414,6 +445,7 @@ export function allocateFreeSpaceOp(
     id: uid('op'),
     type: 'allocate',
     diskNumber: disk.number,
+    diskIdentity: buildDiskIdentity(disk),
     title: `Allouer ${formatSize(transfer)} : ${from.letter || from.label} → ${to.letter || to.label}`,
     description: `Transfert d'espace libre sans perte de données sur Disque ${disk.number}`,
     commandPreview: `# F-Clonedisk Allocate: Shrink ${from.letter} (-${transfer}GB) -> Extend ${to.letter} (+${transfer}GB)`,
@@ -442,10 +474,14 @@ export function cloneDiskOp(
   const sourceNonUnalloc = source.partitions.filter((p) => p.fileSystem !== 'Unallocated');
   const totalUsed = sourceNonUnalloc.reduce((acc, p) => acc + p.usedGB, 0);
   if (opts.mode === 'sector' && target.sizeGB < source.sizeGB) {
-    throw new Error(`Clone secteur par secteur impossible : la cible (${formatSize(target.sizeGB)}) est plus petite que la source (${formatSize(source.sizeGB)}).`);
+    throw new Error(
+      `Clone secteur par secteur impossible : la cible (${formatSize(target.sizeGB)}) est plus petite que la source (${formatSize(source.sizeGB)}).`
+    );
   }
   if (target.sizeGB < totalUsed + 2) {
-    throw new Error(`Espace insuffisant sur la cible (${formatSize(target.sizeGB)}) pour contenir les ${formatSize(totalUsed)} de données utilisées.`);
+    throw new Error(
+      `Espace insuffisant sur la cible (${formatSize(target.sizeGB)}) pour contenir les ${formatSize(totalUsed)} de données utilisées.`
+    );
   }
 
   const fixedParts = sourceNonUnalloc.filter((p) => p.role === 'EFI' || p.role === 'Recovery');
@@ -481,6 +517,8 @@ export function cloneDiskOp(
     clonedParts.push({
       ...sp,
       id: uid('clone'),
+      partitionNumber: 0,
+      isPendingNew: true,
       letter,
       label: sp.label.includes('(Clone)') ? sp.label : `${sp.label} (Clone)`,
       sizeGB: newSize,
@@ -512,6 +550,7 @@ export function cloneDiskOp(
     id: uid('op'),
     type: 'clone_disk',
     diskNumber: target.number,
+    diskIdentity: buildDiskIdentity(target),
     title: `Cloner Disque ${source.number} → Disque ${target.number}`,
     description: `${opts.mode === 'quick' ? 'Clone rapide (secteurs utilisés)' : 'Clone secteur par secteur'}${opts.align4K ? ' + Alignement SSD 4K' : ''}`,
     commandPreview: `# F-Clonedisk Engine: CloneDisk --src=PhysicalDrive${source.number} --dst=PhysicalDrive${target.number} --mode=${opts.mode} --align4k=${opts.align4K}`,
@@ -566,6 +605,8 @@ export function migrateOsOp(
     migrated.push({
       ...sp,
       id: uid('os'),
+      partitionNumber: 0,
+      isPendingNew: true,
       letter,
       label: isMainOs ? `${sp.label} (Migré)` : sp.label,
       sizeGB: clamped,
@@ -596,6 +637,7 @@ export function migrateOsOp(
     id: uid('op'),
     type: 'migrate_os',
     diskNumber: target.number,
+    diskIdentity: buildDiskIdentity(target),
     title: `Migrer l'OS (Disque ${source.number}) → Disque ${target.number}`,
     description: `Migration EFI + Windows + WinRE vers ${target.model} avec réparation BCD UEFI`,
     commandPreview: `# F-Clonedisk OS Migrator: Disk ${source.number} -> Disk ${target.number} && bcdboot /f UEFI`,
