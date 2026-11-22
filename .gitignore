@@ -5,3 +5,6 @@ release/
 *.tsbuildinfo
 .DS_Store
 electron/bin/
+
+native/FClonedisk.DiskWorker/obj/
+native/FClonedisk.DiskWorker/bin/
