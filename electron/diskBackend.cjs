@@ -264,27 +264,38 @@ function buildWindowsCommand(op) {
     case 'wipe_disk': {
       if (params.method) {
         const wArgs = advancedTools.buildWorkerArgs('wipe', { diskNumber, method: params.method });
-        return `FClonedisk.DiskWorker.exe ${wArgs.join(' ')}`;
+        return [
+          `Set-Disk -Number ${diskNumber} -IsOffline $true`,
+          `FClonedisk.DiskWorker.exe ${wArgs.join(' ')}`,
+          `Set-Disk -Number ${diskNumber} -IsOffline $false`,
+        ].join(' ; ');
       }
       return `Clear-Disk -Number ${diskNumber} -RemoveData -RemoveOEM -Confirm:$false`;
     }
 
     case 'clone_disk': {
-      const wArgs = advancedTools.buildWorkerArgs('clone', {
-        sourceDiskNumber: params.sourceDiskNumber,
-        targetDiskNumber: params.targetDiskNumber ?? diskNumber,
-      });
-      return `FClonedisk.DiskWorker.exe ${wArgs.join(' ')}`;
+      const { src, dst } = resolveCloneDisks(op, diskNumber);
+      const wArgs = advancedTools.buildWorkerArgs('clone', { sourceDiskNumber: src, targetDiskNumber: dst });
+      return [
+        `Set-Disk -Number ${src} -IsOffline $true`,
+        `Set-Disk -Number ${dst} -IsOffline $true`,
+        `FClonedisk.DiskWorker.exe ${wArgs.join(' ')} (copie brute + nouvel identifiant de disque)`,
+        `Set-Disk -Number ${src} -IsOffline $false`,
+        `Set-Disk -Number ${dst} -IsOffline $false`,
+      ].join(' ; ');
     }
 
     case 'migrate_os': {
-      const plan = advancedTools.buildMigrateOsCommands(
-        params.sourceDiskNumber,
-        params.targetDiskNumber ?? diskNumber,
-        params.targetOsLetter || 'Z',
-        params.targetEfiLetter || 'S'
-      );
-      return `FClonedisk.DiskWorker.exe ${plan.workerArgs.join(' ')} && ${plan.bcdCommand}`;
+      const { src, dst } = resolveCloneDisks(op, diskNumber);
+      const plan = advancedTools.buildMigrateOsCommands(src, dst);
+      return [
+        `Set-Disk -Number ${src} -IsOffline $true`,
+        `Set-Disk -Number ${dst} -IsOffline $true`,
+        `FClonedisk.DiskWorker.exe ${plan.workerArgs.join(' ')} (copie brute + nouveau GUID)`,
+        `Set-Disk -Number ${src} -IsOffline $false`,
+        `Set-Disk -Number ${dst} -IsOffline $false`,
+        `Lettres temporaires EFI + Windows sur le Disque ${dst}, puis bcdboot <Windows> /s <EFI> /f UEFI`,
+      ].join(' ; ');
     }
 
     case 'backup_vhdx':
@@ -305,6 +316,28 @@ function buildWindowsCommand(op) {
  * Validates the ENTIRE operation queue and builds ALL PowerShell commands before anything executes.
  * If even one operation is invalid, throws immediately and nothing runs.
  */
+const RAW_COPY_OPS = new Set(['clone_disk', 'migrate_os']);
+
+/**
+ * Returns the validated source and target disk numbers of a clone/migration.
+ * The target is always op.diskNumber (the disk whose identity is in op.diskIdentity).
+ */
+function resolveCloneDisks(op, diskNumber) {
+  const params = op.params && typeof op.params === 'object' ? op.params : {};
+  const src = assertNonNegativeInt(params.sourceDiskNumber, 'params.sourceDiskNumber');
+  const dst = params.targetDiskNumber === undefined ? diskNumber : assertNonNegativeInt(params.targetDiskNumber, 'params.targetDiskNumber');
+  if (dst !== diskNumber) {
+    throw new Error(`Incohérence : cible annoncée Disque ${dst}, mais l'identité vérifiée est celle du Disque ${diskNumber}.`);
+  }
+  if (src === dst) throw new Error('Les disques source et cible doivent être différents.');
+  return { src, dst };
+}
+
+function sameDisk(a, b) {
+  if (a.uniqueId && b.uniqueId && a.uniqueId === b.uniqueId) return true;
+  return a.serial !== 'N/A' && b.serial !== 'N/A' && a.serial === b.serial;
+}
+
 function prepareOperations(operations) {
   if (!Array.isArray(operations) || operations.length === 0 || operations.length > 50) {
     throw new Error('File d’opérations vide ou invalide.');
@@ -314,8 +347,16 @@ function prepareOperations(operations) {
     const op = operations[i];
     const diskNumber = assertNonNegativeInt(op?.diskNumber, `operations[${i}].diskNumber`);
     const diskIdentity = validateDiskIdentity(op.diskIdentity, diskNumber);
+    let sourceIdentity = null;
+    if (RAW_COPY_OPS.has(op.type)) {
+      const { src } = resolveCloneDisks(op, diskNumber);
+      sourceIdentity = validateDiskIdentity(op.params.sourceIdentity, src);
+      if (sameDisk(sourceIdentity, diskIdentity)) {
+        throw new Error(`Source et cible désignent le même disque physique (Disque ${src} / Disque ${diskNumber}).`);
+      }
+    }
     const command = buildWindowsCommand(op);
-    prepared.push({ op, diskIdentity, command });
+    prepared.push({ op, diskIdentity, sourceIdentity, command });
   }
   return prepared;
 }
@@ -329,10 +370,14 @@ function formatConfirmationSummary(preparedOps) {
   const lines = preparedOps.map((item, idx) => {
     const id = item.diskIdentity;
     const serialText = id.serial !== 'N/A' ? id.serial : id.uniqueId || 'Inconnu';
-    return [
-      `${idx + 1}. Disque ${id.diskNumber} — ${id.model} | S/N: ${serialText} | ${id.sizeGB} Go`,
-      `   Commande : ${item.command}`,
-    ].join('\n');
+    const out = [`${idx + 1}. ${item.sourceIdentity ? 'CIBLE (écrasée) : ' : ''}Disque ${id.diskNumber} — ${id.model} | S/N: ${serialText} | ${id.sizeGB} Go`];
+    if (item.sourceIdentity) {
+      const s = item.sourceIdentity;
+      const sSerial = s.serial !== 'N/A' ? s.serial : s.uniqueId || 'Inconnu';
+      out.push(`   SOURCE (lue) : Disque ${s.diskNumber} — ${s.model} | S/N: ${sSerial} | ${s.sizeGB} Go`);
+    }
+    out.push(`   Commande : ${item.command}`);
+    return out.join('\n');
   });
   if (hasConvertGpt) {
     lines.push(
@@ -569,6 +614,49 @@ async function assertDiskIdentityMatches(diskIdentity) {
   verifyDiskIdentity(diskIdentity, actual);
 }
 
+/**
+ * A raw copy of the Windows that is currently running gives an inconsistent file system.
+ * Clone / migration of that disk must be launched from the WinPE media.
+ */
+async function assertSourceNotRunningWindows(diskNum) {
+  const n = assertNonNegativeInt(diskNum, 'sourceDiskNumber');
+  const status = await runPowerShell(
+    `$parts = Get-Partition -DiskNumber ${n} -ErrorAction Stop; if ($parts | Where-Object { $_.IsSystem -or $_.IsBoot }) { "LIVE" } else { "SAFE" }`
+  );
+  if (status !== 'SAFE') {
+    throw new Error(
+      `Le Disque ${n} contient le Windows en cours d'exécution : une copie brute serait incohérente. Lancez F-Clonedisk depuis le média WinPE pour cloner ou migrer ce disque.`
+    );
+  }
+}
+
+/**
+ * Takes the given disks offline, runs fn, then puts back online the disks that were online before.
+ * Always restores, even if fn throws.
+ */
+async function withDisksOffline(diskNumbers, fn) {
+  const nums = [...new Set(diskNumbers.map((n) => assertNonNegativeInt(n, 'diskNumber')))];
+  const wasOnline = [];
+  try {
+    for (const n of nums) {
+      const state = await runPowerShell(`if ((Get-Disk -Number ${n} -ErrorAction Stop).IsOffline) { "OFFLINE" } else { "ONLINE" }`);
+      if (state === 'ONLINE') {
+        await runPowerShell(`Set-Disk -Number ${n} -IsOffline $true -ErrorAction Stop`);
+        wasOnline.push(n);
+      }
+    }
+    return await fn();
+  } finally {
+    for (const n of wasOnline) {
+      try {
+        await runPowerShell(`Set-Disk -Number ${n} -IsOffline $false -ErrorAction Stop; Update-HostStorageCache`);
+      } catch {
+        // reported by the caller's next disk refresh; never mask fn's own error
+      }
+    }
+  }
+}
+
 async function assertNotSystemTarget(op) {
   const diskNum = assertNonNegativeInt(op.diskNumber, 'diskNumber');
 
@@ -615,10 +703,15 @@ async function executeOperations(operations, onProgress) {
 
   const results = [];
   for (let i = 0; i < prepared.length; i++) {
-    const { op, diskIdentity, command } = prepared[i];
+    const { op, diskIdentity, sourceIdentity, command } = prepared[i];
     try {
       // Step 1.2: Re-verify live disk identity (UniqueId/SerialNumber/Size) right before execution
       await assertDiskIdentityMatches(diskIdentity);
+      // Clone / migration: the SOURCE disk identity is verified too (never write over a swapped source)
+      if (sourceIdentity) {
+        await assertDiskIdentityMatches(sourceIdentity);
+        await assertSourceNotRunningWindows(sourceIdentity.diskNumber);
+      }
       // Step 1.5: Verify system partition & letter-to-disk consistency right before execution
       await assertNotSystemTarget(op);
 
@@ -632,28 +725,35 @@ async function executeOperations(operations, onProgress) {
       });
 
       let output = '';
+      const progressOf = (scale) => (ev) => {
+        if (ev.type === 'progress') {
+          onProgress({ index: i, total: prepared.length, operationId: op.id, status: 'running', command: `${command} (${ev.mbPerSec} Mo/s)`, percent: Math.round(ev.percent * scale) });
+        }
+      };
+
       if (op.type === 'wipe_disk' && op.params?.method) {
-        const res = await advancedTools.runDiskWorker('wipe', { diskNumber: op.diskNumber, method: op.params.method }, (ev) => {
-          if (ev.type === 'progress') {
-            onProgress({ index: i, total: prepared.length, operationId: op.id, status: 'running', command: `${command} (${ev.mbPerSec} Mo/s)`, percent: Math.round(ev.percent) });
-          }
-        });
+        // Windows refuses raw writes over mounted volumes: take the disk offline first
+        const res = await withDisksOffline([diskIdentity.diskNumber], () =>
+          advancedTools.runDiskWorker('wipe', { diskNumber: diskIdentity.diskNumber, method: op.params.method }, progressOf(1))
+        );
         output = JSON.stringify(res);
       } else if (op.type === 'clone_disk') {
-        const res = await advancedTools.runDiskWorker('clone', { sourceDiskNumber: op.params.sourceDiskNumber, targetDiskNumber: op.params.targetDiskNumber ?? op.diskNumber }, (ev) => {
-          if (ev.type === 'progress') {
-            onProgress({ index: i, total: prepared.length, operationId: op.id, status: 'running', command: `${command} (${ev.mbPerSec} Mo/s)`, percent: Math.round(ev.percent) });
-          }
-        });
+        const src = sourceIdentity.diskNumber;
+        const dst = diskIdentity.diskNumber;
+        const res = await withDisksOffline([src, dst], () =>
+          advancedTools.runDiskWorker('clone', { sourceDiskNumber: src, targetDiskNumber: dst }, progressOf(1))
+        );
         output = JSON.stringify(res);
       } else if (op.type === 'migrate_os') {
-        const plan = advancedTools.buildMigrateOsCommands(op.params.sourceDiskNumber, op.params.targetDiskNumber ?? op.diskNumber, op.params.targetOsLetter || 'Z', op.params.targetEfiLetter || 'S');
-        await advancedTools.runDiskWorker('clone', { sourceDiskNumber: op.params.sourceDiskNumber, targetDiskNumber: op.params.targetDiskNumber ?? op.diskNumber }, (ev) => {
-          if (ev.type === 'progress') {
-            onProgress({ index: i, total: prepared.length, operationId: op.id, status: 'running', command: `${command} (${ev.mbPerSec} Mo/s)`, percent: Math.round(ev.percent * 0.9) });
-          }
-        });
-        output = await runPowerShell(plan.bcdCommand);
+        const src = sourceIdentity.diskNumber;
+        const dst = diskIdentity.diskNumber;
+        const plan = advancedTools.buildMigrateOsCommands(src, dst);
+        const res = await withDisksOffline([src, dst], () =>
+          advancedTools.runDiskWorker('clone', { sourceDiskNumber: src, targetDiskNumber: dst }, progressOf(0.9))
+        );
+        // Both disks are back online, the target now has its own GUID: rebuild its boot files
+        const bcdOut = await runPowerShell(plan.bcdCommand);
+        output = `${JSON.stringify(res)}\n${bcdOut}`;
       } else {
         output = await runPowerShell(command);
       }

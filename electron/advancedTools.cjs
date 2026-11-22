@@ -77,7 +77,11 @@ function buildWorkerArgs(command, params = {}) {
   if (command === 'surface') {
     const disk = assertDiskNum(params.diskNumber, 'diskNumber');
     const segments = Number.isInteger(params.segments) && params.segments >= 16 && params.segments <= 512 ? params.segments : 192;
-    return ['surface', '--disk', String(disk), '--segments', String(segments)];
+    const mode = params.mode === undefined ? 'quick' : params.mode;
+    if (mode !== 'quick' && mode !== 'full') {
+      throw new Error(`Mode de test de surface inconnu : "${mode}" (quick ou full).`);
+    }
+    return ['surface', '--disk', String(disk), '--segments', String(segments), '--mode', mode];
   }
 
   throw new Error(`Commande DiskWorker inconnue : "${command}".`);
@@ -384,18 +388,40 @@ function buildAppMoverScript(sourcePath, targetDrive) {
   ].join('; ');
 }
 
+const GPT_TYPE_ESP = '{c12a7328-f81f-11d2-ba4b-00a0c93ec93b}';
+const GPT_TYPE_BASIC_DATA = '{ebd0a0a2-b9e5-4433-87c0-68b6b72699c7}';
+
 /**
- * Builds the OS Migration command plan (DiskWorker raw clone + bcdboot UEFI repair).
+ * Builds the OS Migration plan: DiskWorker raw clone (with new disk GUID), then a PowerShell
+ * script that finds the EFI and Windows partitions on the TARGET, gives them free letters,
+ * rebuilds the boot files with bcdboot, and removes the temporary EFI letter.
+ * GPT/UEFI only. Must run from WinPE (the source cannot be the running Windows).
  */
-function buildMigrateOsCommands(sourceDiskNumber, targetDiskNumber, targetOsLetter = 'Z', targetEfiLetter = 'S') {
+function buildMigrateOsCommands(sourceDiskNumber, targetDiskNumber) {
   const src = assertDiskNum(sourceDiskNumber, 'sourceDiskNumber');
   const dst = assertDiskNum(targetDiskNumber, 'targetDiskNumber');
   if (src === dst) throw new Error('Le disque cible de migration OS doit être différent du disque source.');
-  const osL = sanitizeLetter(targetOsLetter);
-  const efiL = sanitizeLetter(targetEfiLetter);
+  const bcdScript = [
+    `$n = ${dst}`,
+    `if ((Get-Disk -Number $n).PartitionStyle -ne 'GPT') { throw "Migration réelle : disque GPT/UEFI uniquement." }`,
+    `$parts = Get-Partition -DiskNumber $n`,
+    `$esp = $parts | Where-Object { $_.GptType -eq '${GPT_TYPE_ESP}' } | Select-Object -First 1`,
+    `if (-not $esp) { throw "Partition EFI introuvable sur le Disque $n." }`,
+    `$win = $parts | Where-Object { $_.GptType -eq '${GPT_TYPE_BASIC_DATA}' } | Sort-Object Size -Descending | Select-Object -First 1`,
+    `if (-not $win) { throw "Partition Windows introuvable sur le Disque $n." }`,
+    `$used = @((Get-Volume).DriveLetter) + @((Get-PSDrive -PSProvider FileSystem).Name)`,
+    `$free = @([char[]](70..90) | Where-Object { $used -notcontains $_ })`,
+    `if ($free.Count -lt 2) { throw "Pas assez de lettres de lecteur libres pour la migration." }`,
+    `$winL = "$($win.DriveLetter)".Trim(); if (-not $winL -or $winL -eq [char]0) { $winL = "$($free[-2])"; Set-Partition -DiskNumber $n -PartitionNumber $win.PartitionNumber -NewDriveLetter $winL }`,
+    `if (-not (Test-Path "$($winL):\\Windows\\System32\\winload.efi")) { throw "Aucun Windows UEFI trouvé sur $($winL): (Disque $n)." }`,
+    `$espL = "$($free[-1])"`,
+    `Add-PartitionAccessPath -DiskNumber $n -PartitionNumber $esp.PartitionNumber -AccessPath "$($espL):\\"`,
+    `try { bcdboot "$($winL):\\Windows" /s "$($espL):" /f UEFI; if ($LASTEXITCODE -ne 0) { throw "bcdboot a échoué (code $LASTEXITCODE)." } } ` +
+      `finally { Remove-PartitionAccessPath -DiskNumber $n -PartitionNumber $esp.PartitionNumber -AccessPath "$($espL):\\" -ErrorAction SilentlyContinue }`,
+  ].join('; ');
   return {
     workerArgs: buildWorkerArgs('clone', { sourceDiskNumber: src, targetDiskNumber: dst }),
-    bcdCommand: `bcdboot ${osL}:\\Windows /s ${efiL}: /f UEFI`,
+    bcdCommand: bcdScript,
   };
 }
 

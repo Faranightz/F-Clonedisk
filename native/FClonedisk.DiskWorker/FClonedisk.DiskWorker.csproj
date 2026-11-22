@@ -8,6 +8,7 @@
     <EnableCompressionInSingleFile>true</EnableCompressionInSingleFile>
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
     <AssemblyName>FClonedisk.DiskWorker</AssemblyName>
   </PropertyGroup>
 </Project>

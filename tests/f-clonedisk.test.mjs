@@ -274,7 +274,7 @@ const advancedTools = require('../electron/advancedTools.cjs');
 test('2.1 DiskWorker argument validation for wipe, clone, and surface test', () => {
   assert.deepEqual(advancedTools.buildWorkerArgs('wipe', { diskNumber: 1, method: 'dod3' }), ['wipe', '--disk', '1', '--method', 'dod3']);
   assert.deepEqual(advancedTools.buildWorkerArgs('clone', { sourceDiskNumber: 0, targetDiskNumber: 2 }), ['clone', '--src', '0', '--dst', '2']);
-  assert.deepEqual(advancedTools.buildWorkerArgs('surface', { diskNumber: 1, segments: 192 }), ['surface', '--disk', '1', '--segments', '192']);
+  assert.deepEqual(advancedTools.buildWorkerArgs('surface', { diskNumber: 1, segments: 192 }), ['surface', '--disk', '1', '--segments', '192', '--mode', 'quick']);
 
   assert.throws(() => advancedTools.buildWorkerArgs('wipe', { diskNumber: 1, method: 'gutmann35' }), /non supportée/);
   assert.throws(() => advancedTools.buildWorkerArgs('clone', { sourceDiskNumber: 1, targetDiskNumber: 1 }), /différents/);
@@ -344,4 +344,89 @@ test('3.1 Rapide iT brand palette (#1746D1, #E83E8C, #10213A, #F5F7FC) and self-
   assert.match(css, /#f5f7fc/i);
   assert.match(mainTsx, /@fontsource\/manrope/);
   assert.match(mainTsx, /@fontsource\/inter/);
+});
+
+// ---------------------------------------------------------------------------
+// Relecture Claude Code — clonage, migration, mise hors ligne, test de surface
+// ---------------------------------------------------------------------------
+const SOURCE_IDENTITY = {
+  diskNumber: 0,
+  model: 'Samsung 970 EVO Plus 1TB',
+  serial: 'S4EWNX0R123456',
+  uniqueId: '0025385B91234567',
+  sizeBytes: 400 * 1024 ** 3,
+  sizeGB: 400,
+};
+
+function cloneOp(overrides = {}) {
+  return {
+    id: 'op-clone',
+    type: 'clone_disk',
+    diskNumber: 1,
+    diskIdentity: SAMPLE_DISK_IDENTITY,
+    params: { sourceDiskNumber: 0, targetDiskNumber: 1, sourceIdentity: SOURCE_IDENTITY, ...overrides },
+  };
+}
+
+test('R.1 clone and migration require and verify the SOURCE disk identity', () => {
+  const prepared = prepareOperations([cloneOp()]);
+  assert.equal(prepared[0].sourceIdentity.diskNumber, 0);
+  assert.equal(prepared[0].sourceIdentity.serial, 'S4EWNX0R123456');
+
+  assert.throws(() => prepareOperations([cloneOp({ sourceIdentity: undefined })]), /Identité du disque manquante/);
+  assert.throws(
+    () => prepareOperations([{ ...cloneOp(), type: 'migrate_os' , params: { sourceDiskNumber: 0, targetDiskNumber: 1 } }]),
+    /Identité du disque manquante/
+  );
+  // Target announced in params must be the disk whose identity is verified
+  assert.throws(() => prepareOperations([cloneOp({ targetDiskNumber: 2 })]), /Incohérence/);
+  // Source and target pointing at the same physical disk
+  assert.throws(
+    () => prepareOperations([cloneOp({ sourceIdentity: { ...SAMPLE_DISK_IDENTITY, diskNumber: 0 } })]),
+    /même disque physique/
+  );
+});
+
+test('R.2 confirmation shows SOURCE and TARGET, raw operations take the disks offline first', () => {
+  const prepared = prepareOperations([cloneOp()]);
+  const summary = formatConfirmationSummary(prepared);
+  assert.match(summary, /CIBLE \(écrasée\) : Disque 1/);
+  assert.match(summary, /SOURCE \(lue\) : Disque 0 — Samsung 970 EVO Plus 1TB \| S\/N: S4EWNX0R123456/);
+  assert.match(prepared[0].command, /^Set-Disk -Number 0 -IsOffline \$true ; Set-Disk -Number 1 -IsOffline \$true ; FClonedisk\.DiskWorker\.exe clone --src 0 --dst 1/);
+
+  const wipe = buildWindowsCommand({ type: 'wipe_disk', diskNumber: 3, params: { method: 'dod3' } });
+  assert.match(wipe, /^Set-Disk -Number 3 -IsOffline \$true ; FClonedisk\.DiskWorker\.exe wipe --disk 3 --method dod3 ; Set-Disk -Number 3 -IsOffline \$false$/);
+});
+
+test('R.3 OS migration finds EFI/Windows partitions itself and never uses fixed letters', () => {
+  const plan = advancedTools.buildMigrateOsCommands(0, 1);
+  assert.deepEqual(plan.workerArgs, ['clone', '--src', '0', '--dst', '1']);
+  assert.match(plan.bcdCommand, /\$n = 1;/);
+  assert.match(plan.bcdCommand, /c12a7328-f81f-11d2-ba4b-00a0c93ec93b/);
+  assert.match(plan.bcdCommand, /PartitionStyle -ne 'GPT'/);
+  assert.match(plan.bcdCommand, /winload\.efi/);
+  assert.match(plan.bcdCommand, /Add-PartitionAccessPath/);
+  assert.ok(plan.bcdCommand.includes(String.raw`bcdboot "$($winL):\Windows" /s "$($espL):" /f UEFI`));
+  assert.ok(plan.bcdCommand.includes('} } finally { Remove-PartitionAccessPath'), 'try et finally doivent se suivre sans point-virgule');
+  assert.doesNotMatch(plan.bcdCommand, /\}\s*;\s*finally/);
+  assert.doesNotMatch(plan.bcdCommand, /bcdboot Z:/);
+  assert.throws(() => advancedTools.buildMigrateOsCommands(2, 2), /différent/);
+});
+
+test('R.4 surface test offers quick and full modes only', () => {
+  assert.deepEqual(advancedTools.buildWorkerArgs('surface', { diskNumber: 2, mode: 'full' }), ['surface', '--disk', '2', '--segments', '192', '--mode', 'full']);
+  assert.throws(() => advancedTools.buildWorkerArgs('surface', { diskNumber: 2, mode: 'write' }), /Mode de test de surface inconnu/);
+});
+
+test('R.5 DiskWorker uses 4096-aligned native buffers, RandomAccess I/O and regenerates the disk identity', () => {
+  const src = fs.readFileSync(path.join(process.cwd(), 'native', 'FClonedisk.DiskWorker', 'Program.cs'), 'utf8');
+  assert.match(src, /NativeMemory\.AlignedAlloc\(\(nuint\)length, ALIGNMENT\)/);
+  assert.match(src, /RandomAccess\.Write\(/);
+  assert.doesNotMatch(src, /new FileStream\(/);
+  assert.match(src, /RegenerateDiskIdentity\(dst, src\.Length\)/);
+  assert.match(src, /if \(status == "bad"\) badCount\+\+;/);
+  const csproj = fs.readFileSync(path.join(process.cwd(), 'native', 'FClonedisk.DiskWorker', 'FClonedisk.DiskWorker.csproj'), 'utf8');
+  assert.match(csproj, /<AllowUnsafeBlocks>true<\/AllowUnsafeBlocks>/);
+  const pkg = JSON.parse(fs.readFileSync(path.join(process.cwd(), 'package.json'), 'utf8'));
+  assert.deepEqual(pkg.build.extraResources[0], { from: 'electron/bin', to: 'worker', filter: ['FClonedisk.DiskWorker.exe'] });
 });

@@ -553,8 +553,8 @@ export function cloneDiskOp(
     diskIdentity: buildDiskIdentity(target),
     title: `Cloner Disque ${source.number} → Disque ${target.number}`,
     description: `${opts.mode === 'quick' ? 'Clone rapide (secteurs utilisés)' : 'Clone secteur par secteur'}${opts.align4K ? ' + Alignement SSD 4K' : ''}`,
-    commandPreview: `# F-Clonedisk Engine: CloneDisk --src=PhysicalDrive${source.number} --dst=PhysicalDrive${target.number} --mode=${opts.mode} --align4k=${opts.align4K}`,
-    params: { sourceDiskNumber: source.number, targetDiskNumber: target.number, ...opts },
+    commandPreview: `Disques ${source.number} et ${target.number} hors ligne ; DiskWorker clone --src ${source.number} --dst ${target.number} (copie secteur par secteur complète + nouvel identifiant) ; remise en ligne`,
+    params: { sourceDiskNumber: source.number, targetDiskNumber: target.number, sourceIdentity: buildDiskIdentity(source), ...opts },
     createdAt: new Date().toLocaleTimeString('fr-FR'),
   };
 
@@ -640,8 +640,8 @@ export function migrateOsOp(
     diskIdentity: buildDiskIdentity(target),
     title: `Migrer l'OS (Disque ${source.number}) → Disque ${target.number}`,
     description: `Migration EFI + Windows + WinRE vers ${target.model} avec réparation BCD UEFI`,
-    commandPreview: `# F-Clonedisk OS Migrator: Disk ${source.number} -> Disk ${target.number} && bcdboot /f UEFI`,
-    params: { sourceDiskNumber: source.number, targetDiskNumber: target.number, align4K },
+    commandPreview: `Disques ${source.number} et ${target.number} hors ligne ; DiskWorker clone (copie complète + nouveau GUID) ; remise en ligne ; bcdboot sur le Disque ${target.number} (depuis WinPE uniquement)`,
+    params: { sourceDiskNumber: source.number, targetDiskNumber: target.number, sourceIdentity: buildDiskIdentity(source), align4K },
     createdAt: new Date().toLocaleTimeString('fr-FR'),
   };
 

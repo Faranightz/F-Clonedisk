@@ -189,7 +189,7 @@ declare global {
       }>;
       listDisks: () => Promise<{ supported: boolean; disks: Disk[]; reason?: string }>;
       executeOperations: (ops: PendingOperation[]) => Promise<{ cancelled: boolean; results: ExecutionStepResult[] }>;
-      runSurfaceTest: (diskNumber: number, segments?: number) => Promise<unknown>;
+      runSurfaceTest: (diskNumber: number, segments?: number, mode?: 'quick' | 'full') => Promise<unknown>;
       createWinPe: (opts: { mode: 'iso' | 'ufd'; usbLetter?: string; isoPath?: string }) => Promise<{
         ok: boolean;
         adkInstalled: boolean;

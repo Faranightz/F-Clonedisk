@@ -588,7 +588,7 @@ export default function App() {
                 <Cpu size={15} color="var(--accent)" /> Migrer l'OS vers SSD/HDD
               </button>
               <button className="sidebar-item" onClick={() => setActiveModal('backup')}>
-                <HardDrive size={15} color="var(--accent)" /> Sauvegarde / Image (wbadmin / VHDX)
+                <HardDrive size={15} color="var(--accent)" /> Sauvegarde (wbadmin) / Copie VHDX
               </button>
               <button className="sidebar-item" onClick={() => setActiveModal('recovery')}>
                 <Search size={15} /> Récupération de Partitions (TestDisk)
@@ -1029,7 +1029,7 @@ export default function App() {
               title:
                 opts.engine === 'wbadmin'
                   ? `Sauvegarde wbadmin ${opts.sourceDrive} → ${opts.targetDrive}`
-                  : `Image VHDX ${opts.sourceDrive} → ${opts.vhdxPath}`,
+                  : `Copie de fichiers ${opts.sourceDrive} → ${opts.vhdxPath}`,
               description:
                 opts.engine === 'wbadmin'
                   ? `Sauvegarde critique Windows vers ${opts.targetDrive}`

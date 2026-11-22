@@ -880,19 +880,19 @@ export const Wizards: React.FC<WizardsProps> = (props) => {
         return (
           <>
             <div className="modal-header">
-              <h2 className="modal-title"><HardDrive size={18} color="var(--accent)" /> Sauvegarde / Image disque (wbadmin ou VHDX)</h2>
+              <h2 className="modal-title"><HardDrive size={18} color="var(--accent)" /> Sauvegarde système (wbadmin) ou copie de fichiers (VHDX)</h2>
               <button className="btn btn-ghost" aria-label="Fermer" onClick={onClose}><X size={16} /></button>
             </div>
             <div className="modal-body">
               <div className="info-banner">
-                Créez une sauvegarde système Windows (<code>wbadmin</code>) ou une image disque virtuelle <strong>VHDX</strong> dynamique montable directement dans Windows.
+                Créez une sauvegarde système Windows restaurable (<code>wbadmin</code>), ou une simple <strong>copie de fichiers</strong> dans un disque virtuel VHDX. La copie VHDX ne permet pas de restaurer un Windows démarrable.
               </div>
               <div className="form-grid">
                 <div className="form-field">
                   <label>Moteur de sauvegarde</label>
                   <select className="select" value={backupEngine} onChange={(e) => setBackupEngine(e.target.value as 'wbadmin' | 'vhdx')}>
                     <option value="wbadmin">Windows Server Backup (wbadmin -allCritical)</option>
-                    <option value="vhdx">Image virtuelle VHDX (New-VHD + robocopy)</option>
+                    <option value="vhdx">Copie de fichiers vers un VHDX (robocopy, non démarrable)</option>
                   </select>
                 </div>
                 <div className="form-field">

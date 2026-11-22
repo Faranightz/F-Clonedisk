@@ -75,3 +75,57 @@ Appliquer la charte Rapide iT à toute l'app (`src/index.css`). Contrastes WCAG 
 
 **Antigravity (`agy`)** pour le code des étapes 1 à 3.
 **Claude Code** pour relire l'étape 1 avant de passer à l'étape 2 (relecture critique ciblée).
+
+---
+
+## Relecture Claude Code du 21/11/2026 (commits 75dccc6 et d772f33)
+
+Contrôles : `npm ci` OK · build OK · `npm test` 12/12 · `npm audit --omit=dev` 0 faille · `npm audit` 6 moyennes (outils de build) · `dotnet build` **impossible** : le SDK .NET n'est pas installé sur le PC.
+
+Note : l'étape 2 a été faite sans attendre la relecture de l'étape 1, contrairement au plan.
+
+### Étape 1 : validée
+Vrais numéros de partition, identité du disque vérifiée avant chaque opération, file validée en entier, confirmation avec les vraies commandes, contrôle par lettre, noms de volume en liste blanche, `mbr2gpt /validate`, Electron 45. Bon travail.
+
+### Étape 2 : à corriger AVANT tout essai, même sur VM
+
+1. **[Critique] Clonage : le disque source n'est pas vérifié.** Seule l'identité de la cible est contrôlée (`diskEngine.ts:553`). Si les numéros changent, on peut copier un disque vide SUR le disque source. → Envoyer et vérifier `sourceIdentity` aussi (clone_disk et migrate_os).
+2. **[Critique] Écriture brute sur un disque encore monté.** Windows bloque l'écriture sur les zones des volumes montés : wipe et clone échoueront en plein milieu (disque à moitié effacé). → Avant : `Set-Disk -IsOffline $true` sur la cible (et lecture seule de la source). Après : remettre en ligne. Dans le worker, gérer `FSCTL_LOCK_VOLUME` + `FSCTL_DISMOUNT_VOLUME` si besoin.
+3. **[Critique] Migration de l'OS ne peut pas marcher.**
+   - Copier brut le disque Windows en cours d'utilisation donne un système de fichiers incohérent. → Passer par un cliché VSS, ou ne proposer la migration que depuis WinPE.
+   - Après la copie, les deux disques ont le même GUID : Windows met la copie hors ligne. → Changer le GUID du disque cible (`Set-Disk -Guid` ou réécriture GPT).
+   - `bcdboot Z:\Windows /s S:` : les lettres Z: et S: ne sont jamais attribuées. → Attribuer les lettres avant (`Set-Partition -NewDriveLetter`).
+4. **[Haute] Clonage vers un disque plus grand (GPT).** L'en-tête GPT de secours reste au milieu du disque. → Le déplacer en fin de disque après la copie, puis agrandir la dernière partition.
+5. **[Haute] E/S sans tampon (`FILE_FLAG_NO_BUFFERING`).** Les `byte[]` .NET ne sont pas alignés sur 4096 et `FileStream` ajoute son propre tampon : risque d'erreur « paramètre incorrect ». → `NativeMemory.AlignedAlloc(4096)`, `bufferSize: 0`, tailles multiples de la taille de secteur physique (4Kn = 4096).
+6. **[Haute] Le worker n'a jamais été compilé.** Installer le SDK .NET 8 (accord de Farid), lancer `npm run build:worker`, et ajouter `electron/bin` dans `extraResources` d'electron-builder (sinon l'exe n'est pas dans l'installateur).
+7. **[Moyenne] « Sauvegarde VHDX » = copie de fichiers robocopy.** Ce n'est pas une image système restaurable. → La renommer « Copie de fichiers vers VHDX », ou faire une vraie image (`wbadmin start backup -allCritical` ou copie de bloc via VSS).
+8. **[Moyenne] Test de surface : il lit 192 blocs de 1 Mo, pas tout le disque.** `badCount` n'augmente pas quand `read < 512`. → Proposer « rapide » (échantillon) et « complet » (tout le disque), et corriger le compteur.
+9. **[Basse] Aperçu de commande** `DiskWorker ... && bcdboot` : ce n'est pas ce qui s'exécute. Afficher les vraies étapes.
+
+### Ordre
+Points 1, 2, 5, 6 → compilation du worker → test sur VM (disques virtuels jetables) avec preuves (logs, captures) → points 3, 4 → 7, 8, 9 → nouvelle relecture Claude Code.
+
+---
+
+## Corrections Claude Code du 22/11/2026 (non commitées)
+
+Preuves : `npm test` 17/17 · `npm run build` OK · scripts PowerShell générés analysés par le parseur PowerShell : 0 erreur de syntaxe. **Le worker C# n'est toujours pas compilé** (SDK .NET 8 absent) : à compiler et tester avant tout usage.
+
+| Point | État |
+|---|---|
+| 1. Identité du disque source | Fait. `sourceIdentity` exigé, vérifié avant exécution, source ≠ cible, cible = `diskNumber` vérifié. Confirmation affiche SOURCE et CIBLE. |
+| 2. Disque monté | Fait. `withDisksOffline()` met source et cible hors ligne avant wipe/clone/migration et les remet en ligne même en cas d'erreur. |
+| 3. Migration OS | Fait en partie. Refus si la source est le Windows en cours (à lancer depuis WinPE). Nouveau GUID après copie. Le script trouve la partition EFI et la partition Windows, prend des lettres libres, lance bcdboot, retire la lettre EFI (try/finally). GPT/UEFI uniquement. |
+| 4. GPT de secours | Fait dans le worker : en-tête et table de secours replacés en fin de disque, CRC recalculés, ancien en-tête effacé, MBR protecteur ajusté. MBR : nouvelle signature. |
+| 5. E/S alignées | Fait. `NativeMemory.AlignedAlloc(4096)` + `RandomAccess`, plus de `FileStream`. Refus si les tailles de secteur source et cible diffèrent. |
+| 6. Packaging | Fait. `extraResources` → `resources/worker`, `build:win` lance `build:worker`, `electron/bin/` ignoré par Git. |
+| 7. VHDX | Fait. Renommé « Copie de fichiers vers un VHDX (non démarrable) ». |
+| 8. Test de surface | Fait côté worker : modes `quick` et `full`, compteur corrigé. **Reste :** l'écran du test de surface est encore simulé, il n'appelle pas `window.fClonedisk.runSurfaceTest`. |
+| 9. Aperçu des commandes | Fait. Les vraies étapes s'affichent (hors ligne, worker, en ligne, bcdboot). |
+
+### Reste à faire (Antigravity)
+1. Installer le SDK .NET 8 (accord de Farid), `npm run build:worker`, corriger les erreurs de compilation éventuelles.
+2. Brancher l'écran du test de surface sur `runSurfaceTest(disk, 192, 'quick' | 'full')`, avec un choix rapide/complet.
+3. Inclure F-Clonedisk dans le média WinPE (migration et clone du disque Windows ne marchent que depuis WinPE).
+4. Tests sur VM avec disques virtuels jetables (`New-VHD`), preuves à l'appui : effacement, clone MBR, clone GPT vers disque plus grand (vérifier avec `diskpart` > `list disk` que les deux disques restent en ligne), migration depuis WinPE puis démarrage de la VM sur le disque cible.
+5. À vérifier sur VM : `Add-PartitionAccessPath` sur la partition EFI (si refus, utiliser `diskpart assign letter`).
